@@ -2,8 +2,8 @@
 # This file will launch the main GUI
 
 def main():
-    # Placeholder for GUI launch logic
-    pass
+    from ui.main_window import run
+    run()
 
 if __name__ == "__main__":
     main() 
