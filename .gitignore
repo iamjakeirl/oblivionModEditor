@@ -1,0 +1,48 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+*.spec
+
+# Installer logs
+dist/main.dist/
+dist/main.build/
+dist/main.onefile-build/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer archives
+*.zip
+*.tar.gz
+*.egg
+
+# Executables
+*.exe
+
+# User-specific files
+.DS_Store
+Thumbs.db
+
+# IDE/project files
+.vscode/
+.idea/
+
+# User data and mod manager state (if not meant for versioning)
+oblivion_mod_manager/data/*.json
+
+# Ignore large binary releases
+OblivionModManager.zip
+
+# Uncomment below if you want to ignore all .json files (not recommended if you have config templates)
+# *.json 
