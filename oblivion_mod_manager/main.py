@@ -1,4 +1,4 @@
-# Entry point for Oblivion Remastered Mod Manager
+# Entry point for jorkXL's Oblivion Remastered Mod Manager
 # This file will launch the main GUI
 
 def main():

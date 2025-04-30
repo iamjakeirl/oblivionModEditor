@@ -15,12 +15,12 @@
 ## 3. Core Features & Steps
 
 ### A. Drag-and-Drop Mod Import
-- **UI:** Main window with a visible drag-and-drop area (“Drop your .zip or .7z mod here”)
-- **Validation:** Accept only .zip or .7z files. Show error for others
+- **UI:** Main window with a visible drag-and-drop area ("Drop your .zip, .7z, or .rar mod here")
+- **Validation:** Accept only .zip, .7z, or .rar files. Show error for others
 - **Feedback:** Show progress bar or spinner during install
 
 ### B. Archive Extraction & Mod Detection
-- **Extraction:** Use `zipfile` for .zip, `py7zr` for .7z (both pure Python)
+- **Extraction:** Use `zipfile` for .zip, `py7zr` for .7z, and `rarfile`/`pyunpack` for .rar (all pure Python)
 - **Temp Folder:** Extract to a temp directory inside `data/temp/`
 - **Detection:** Scan for `.esp` and `.pak` files (case-insensitive). Note any other files (e.g., .bsa, .ini)
 
@@ -101,6 +101,7 @@ oblivion_mod_manager/
 - PyQt5 or PySide6 (GUI)
 - zipfile (standard library, for .zip)
 - py7zr (for .7z)
+- rarfile, patool, pyunpack (for .rar)
 - shutil, os, pathlib (file operations)
 - json (mod registry)
 - PyInstaller (for packaging)

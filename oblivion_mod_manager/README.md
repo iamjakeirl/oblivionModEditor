@@ -3,7 +3,7 @@
 A portable, Python-based mod manager for Oblivion Remastered.
 
 ## Features
-- Drag-and-drop mod import (.zip, .7z)
+- Drag-and-drop mod import (.zip, .7z, .rar)
 - Mod installation, activation, deactivation
 - Mod registry and load order management
 - Portable: can run from a USB stick

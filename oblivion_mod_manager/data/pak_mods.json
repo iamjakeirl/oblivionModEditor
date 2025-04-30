@@ -1,0 +1,61 @@
+[
+  {
+    "name": "Realistic_Skin_p.pak",
+    "base_name": "Realistic_Skin_p",
+    "files": [
+      "Y:/Games/The Elder Scrolls IV- Oblivion Remastered\\Content/OblivionRemastered/Content/Paks/~mods\\Realistic_Skin_p.pak",
+      "Y:/Games/The Elder Scrolls IV- Oblivion Remastered\\Content/OblivionRemastered/Content/Paks/~mods\\Realistic_Skin_p.ucas",
+      "Y:/Games/The Elder Scrolls IV- Oblivion Remastered\\Content/OblivionRemastered/Content/Paks/~mods\\Realistic_Skin_p.utoc"
+    ],
+    "active": true
+  },
+  {
+    "name": "pakchunk17-Windows_P.pak",
+    "base_name": "pakchunk17-Windows_P",
+    "files": [
+      "Y:/Games/The Elder Scrolls IV- Oblivion Remastered\\Content/OblivionRemastered/Content/Paks/~mods\\Young Textures Revamped-445-1-4-1745867158\\pakchunk17-Windows_P.pak",
+      "Y:/Games/The Elder Scrolls IV- Oblivion Remastered\\Content/OblivionRemastered/Content/Paks/~mods\\Young Textures Revamped-445-1-4-1745867158\\pakchunk17-Windows_P.ucas",
+      "Y:/Games/The Elder Scrolls IV- Oblivion Remastered\\Content/OblivionRemastered/Content/Paks/~mods\\Young Textures Revamped-445-1-4-1745867158\\pakchunk17-Windows_P.utoc"
+    ],
+    "extensions": [
+      ".pak",
+      ".ucas",
+      ".utoc"
+    ],
+    "subfolder": "Young Textures Revamped-445-1-4-1745867158",
+    "active": true
+  },
+  {
+    "name": "000_LessBlack_P.pak",
+    "base_name": "000_LessBlack_P",
+    "files": [
+      "Y:/Games/The Elder Scrolls IV- Oblivion Remastered\\Content/OblivionRemastered/Content/Paks/~mods\\Less Ugly Black Infoboxes-222-1-1-1-1745852400\\000_LessBlack_P.pak",
+      "Y:/Games/The Elder Scrolls IV- Oblivion Remastered\\Content/OblivionRemastered/Content/Paks/~mods\\Less Ugly Black Infoboxes-222-1-1-1-1745852400\\000_LessBlack_P.ucas",
+      "Y:/Games/The Elder Scrolls IV- Oblivion Remastered\\Content/OblivionRemastered/Content/Paks/~mods\\Less Ugly Black Infoboxes-222-1-1-1-1745852400\\000_LessBlack_P.utoc"
+    ],
+    "extensions": [
+      ".pak",
+      ".ucas",
+      ".utoc"
+    ],
+    "subfolder": "Less Ugly Black Infoboxes-222-1-1-1-1745852400",
+    "active": true
+  },
+  {
+    "name": "4K_WorldMap_p.pak",
+    "base_name": "4K_WorldMap_p",
+    "files": [
+      "Y:/Games/The Elder Scrolls IV- Oblivion Remastered\\Content/OblivionRemastered/Content/Paks/~mods\\4K_WorldMap_p.pak",
+      "Y:/Games/The Elder Scrolls IV- Oblivion Remastered\\Content/OblivionRemastered/Content/Paks/~mods\\4K_WorldMap_p.ucas",
+      "Y:/Games/The Elder Scrolls IV- Oblivion Remastered\\Content/OblivionRemastered/Content/Paks/~mods\\4K_WorldMap_p.utoc"
+    ],
+    "extensions": [
+      ".pak",
+      ".ucas",
+      ".utoc"
+    ],
+    "subfolder": null,
+    "installed_date": null,
+    "active": true
+  }
+]
