@@ -6,7 +6,7 @@ A streamlined tool for managing ESP plugins and PAK mods for Oblivion Remastered
 
 - **ESP Management**: Enable, disable, and reorder ESP plugin files
 - **PAK Management**: Activate, deactivate, and organize PAK mods
-- **Drag-and-Drop Support**: Easily install mods by dragging ZIP, 7Z, or RAR archives
+- **Drag-and-Drop Support**: Easily install mods by dragging ZIP, or 7zip. Drag and drop loose mods if they come in a RAR after extracting yourself.
 - **Dark Mode UI**: Modern, sleek interface for comfortable use
 
 ## Quick Start
