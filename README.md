@@ -45,4 +45,3 @@ A streamlined tool for managing ESP plugins and PAK mods for Oblivion Remastered
 ## Credits
 
 Created by jorkXL
-Icon from Pictogrammers Material Design Icons 
