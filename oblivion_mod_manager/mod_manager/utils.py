@@ -88,4 +88,17 @@ def save_pak_mods(pak_mods_data):
         return True
     except IOError as e:
         print(f"Error writing PAK mods file: {e}")
+        return False
+
+def open_folder_in_explorer(path):
+    """
+    Open the given folder in Windows Explorer (Windows only).
+    """
+    if not os.path.isdir(path):
+        return False
+    try:
+        os.startfile(path)
+        return True
+    except Exception as e:
+        print(f"Error opening folder in Explorer: {e}")
         return False 

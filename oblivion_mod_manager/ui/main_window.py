@@ -7,11 +7,11 @@ import uuid
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QListWidget, QListWidgetItem, QFileDialog, QMessageBox, QAbstractItemView, QCheckBox,
-    QMenu, QAction, QTabWidget, QInputDialog, QProgressDialog, QFrame
+    QMenu, QAction, QTabWidget, QInputDialog, QProgressDialog, QFrame, QDialog, QSpacerItem, QSizePolicy
 )
 from PyQt5.QtCore import Qt, QEvent, QItemSelectionModel, QUrl, QMimeData, QTimer
 from PyQt5.QtGui import QDrag, QPixmap, QColor, QFont, QDragEnterEvent, QDropEvent
-from mod_manager.utils import get_game_path, SETTINGS_PATH, get_esp_folder, DATA_DIR
+from mod_manager.utils import get_game_path, SETTINGS_PATH, get_esp_folder, DATA_DIR, open_folder_in_explorer
 from mod_manager.registry import list_esp_files, read_plugins_txt, write_plugins_txt
 from mod_manager.pak_manager import (
     list_managed_paks, add_pak, remove_pak, scan_for_installed_paks, 
@@ -19,6 +19,7 @@ from mod_manager.pak_manager import (
     activate_pak, deactivate_pak, get_pak_target_dir
 )
 import json
+import datetime
 
 # Import archive handling libraries
 import zipfile
@@ -126,7 +127,7 @@ class MainWindow(QWidget):
         # Add drag-and-drop hint label
         self.drag_drop_layout = QHBoxLayout()
         self.layout.addLayout(self.drag_drop_layout)
-        self.drag_drop_label = QLabel("Tip: You can drag and drop .zip, .7z, or .rar archives onto this window to install mods")
+        self.drag_drop_label = QLabel("Tip: You can drag and drop .zip or .7z archives onto this window to install mods. <b>RAR files likely will not work and must be installed manually.</b>")
         self.drag_drop_label.setStyleSheet("color: #888888; font-style: italic;")
         self.drag_drop_label.setAlignment(Qt.AlignCenter)
         self.drag_drop_layout.addWidget(self.drag_drop_label)
@@ -137,6 +138,30 @@ class MainWindow(QWidget):
         # Create tab widget
         self.notebook = QTabWidget()
         self.layout.addWidget(self.notebook)
+        self.open_folder_btn = QPushButton("Open Folder")
+        self.open_folder_btn.setCursor(Qt.PointingHandCursor)
+        self.open_folder_btn.setMinimumHeight(32)
+        self.open_folder_btn.setMaximumHeight(32)
+        self.open_folder_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #292929;
+                color: #ff9800;
+                border: 1px solid #444;
+                border-radius: 4px;
+                padding: 6px 16px;
+            }
+            QPushButton:hover {
+                background-color: #333;
+                color: #fff;
+                border: 1px solid #ff9800;
+            }
+            QPushButton:pressed {
+                background-color: #181818;
+                color: #ff9800;
+            }
+        """)
+        self.open_folder_btn.clicked.connect(self.open_current_tab_folder)
+        self.notebook.setCornerWidget(self.open_folder_btn, Qt.TopRightCorner)
 
         # Create ESP tab
         self.esp_frame = QWidget()
@@ -246,25 +271,11 @@ class MainWindow(QWidget):
         
         # PAK control buttons
         self.pak_button_row = QHBoxLayout()
-        
-        self.add_pak_btn = QPushButton("Add PAK...")
-        self.add_pak_btn.setMinimumHeight(48)
-        self.add_pak_btn.setMinimumWidth(48)
-        self.add_pak_btn.clicked.connect(self._add_pak_clicked)
-        self.pak_button_row.addWidget(self.add_pak_btn)
-        
-        self.remove_pak_btn = QPushButton("Remove Selected PAK")
-        self.remove_pak_btn.setMinimumHeight(48)
-        self.remove_pak_btn.setMinimumWidth(48)
-        self.remove_pak_btn.clicked.connect(self._remove_pak_clicked)
-        self.pak_button_row.addWidget(self.remove_pak_btn)
-        
         self.refresh_pak_btn = QPushButton("Refresh PAK List")
         self.refresh_pak_btn.setMinimumHeight(48)
         self.refresh_pak_btn.setMinimumWidth(48)
         self.refresh_pak_btn.clicked.connect(self._load_pak_list)
         self.pak_button_row.addWidget(self.refresh_pak_btn)
-        
         self.pak_layout.addLayout(self.pak_button_row)
         
         # Add PAK tab to notebook
@@ -395,33 +406,32 @@ class MainWindow(QWidget):
 
     # Add drag and drop event handlers
     def dragEnterEvent(self, event: QDragEnterEvent):
-        """Handle drag enter events for archive files."""
-        # Check if the drag contains URLs/files
+        """Accept drag if any URL is a file or directory (not just archives)."""
         if event.mimeData().hasUrls():
-            # Check if any URL is a supported archive format
             for url in event.mimeData().urls():
                 file_path = url.toLocalFile()
-                if self._is_supported_archive(file_path):
+                if os.path.isfile(file_path) or os.path.isdir(file_path):
                     event.acceptProposedAction()
                     return
         event.ignore()
 
-    def dropEvent(self, event: QDropEvent):
-        """Handle drop events for archive files."""
-        # Get the URLs from the event
+    def dropEvent(self, event):
+        """Handle drop events for archive files or groups of files/folders."""
         urls = event.mimeData().urls()
-        files_to_process = []
-        
-        # Filter for supported archive files
+        archive_files = []
+        non_archives = []
         for url in urls:
             file_path = url.toLocalFile()
             if self._is_supported_archive(file_path):
-                files_to_process.append(file_path)
-        
-        # Process the dropped archives
-        if files_to_process:
+                archive_files.append(file_path)
+            elif os.path.isfile(file_path) or os.path.isdir(file_path):
+                non_archives.append(file_path)
+        if archive_files:
             event.acceptProposedAction()
-            self._process_dropped_archives(files_to_process)
+            self._process_dropped_archives(archive_files)
+        elif non_archives:
+            event.acceptProposedAction()
+            self._process_dropped_files(non_archives)
         else:
             event.ignore()
 
@@ -537,13 +547,14 @@ class MainWindow(QWidget):
             self.show_status(f"Extraction error: Failed to extract {os.path.basename(archive_path)}: {str(e)}", 10000, "error")
             return None
 
-    def _install_extracted_mod(self, extract_dir, mod_name):
+    def _install_extracted_mod(self, extract_dir, mod_name, force_subfolder=None):
         """
         Install extracted mod files to the appropriate locations.
         
         Args:
             extract_dir: Directory containing extracted mod files
             mod_name: Name of the mod (for display purposes)
+            force_subfolder: If provided, use this as the subfolder for all PAKs
         """
         # Find ESP and PAK files in the extracted content
         esp_files = []
@@ -601,12 +612,12 @@ class MainWindow(QWidget):
         for pak_path in pak_files:
             try:
                 # Determine subfolder based on mod structure
-                subfolder = None
-                
-                # If there are multiple PAK files, use mod name as subfolder
-                if len(pak_files) > 1:
+                if force_subfolder is not None:
+                    subfolder = force_subfolder
+                elif len(pak_files) > 1:
                     subfolder = mod_name.split('.')[0]  # Use archive name without extension
-                
+                else:
+                    subfolder = None
                 # Add the PAK file using existing functionality
                 result = add_pak(self.game_path, pak_path, subfolder)
                 if result:
@@ -1012,19 +1023,16 @@ class MainWindow(QWidget):
         if not self.game_path:
             self.show_status("Error: Game path not set.", 5000, "error")
             return
-            
         # Store info for reselection
         to_reselect = [{
             "name": pak_info["name"],
             "subfolder": pak_info.get("subfolder"),
             "active": True  # Will be active after operation
         }]
-            
         success = activate_pak(self.game_path, pak_info)
         if success:
             self.show_status(f"Activated PAK mod: {pak_info['name']}", 3000, "success")
             self._load_pak_list()
-            self._reselect_items_by_info(to_reselect)
         else:
             self.show_status(f"Error: Failed to activate PAK mod: {pak_info['name']}", 5000, "error")
     
@@ -1033,19 +1041,16 @@ class MainWindow(QWidget):
         if not self.game_path:
             self.show_status("Error: Game path not set.", 5000, "error")
             return
-            
         # Store info for reselection
         to_reselect = [{
             "name": pak_info["name"],
             "subfolder": pak_info.get("subfolder"),
             "active": False  # Will be inactive after operation
         }]
-            
         success = deactivate_pak(self.game_path, pak_info)
         if success:
             self.show_status(f"Deactivated PAK mod: {pak_info['name']}", 3000, "success")
             self._load_pak_list()
-            self._reselect_items_by_info(to_reselect)
         else:
             self.show_status(f"Error: Failed to deactivate PAK mod: {pak_info['name']}", 5000, "error")
     
@@ -1074,209 +1079,52 @@ class MainWindow(QWidget):
         else:
             QMessageBox.warning(self, "Error", f"Failed to remove PAK mod: {pak_info['name']}")
 
-    def _remove_pak_clicked(self):
-        """Handle Remove PAK button click."""
-        # Get selected items from both active and inactive lists
-        active_selected = self.active_pak_listbox.selectedItems()
-        inactive_selected = self.inactive_pak_listbox.selectedItems()
-        
-        # Combine the selections
-        selected_items = active_selected + inactive_selected
-        
-        # Check if any items are selected
-        if not selected_items:
-            self.show_status("No PAK files selected for removal.", 4000, "warning")
-            return
-            
-        # Check if game path is set
-        if not self.game_path:
-            self.show_status("Game path not set. Please set a valid game path first.", 6000, "error")
-            return
-            
-        # Get the original pak info for each selected item
-        selected_paks = []
-        for item in selected_items:
-            pak_info = item.data(Qt.UserRole)
-            if pak_info and "name" in pak_info:
-                selected_paks.append(pak_info)
-        
-        if not selected_paks:
-            self.show_status("Could not retrieve PAK information for selected items.", 6000, "error")
-            return
-            
-        # Create description list for confirmation message
-        pak_descriptions = []
-        for pak in selected_paks:
-            if pak.get("subfolder"):
-                pak_descriptions.append(f"{pak['name']} (in subfolder {pak['subfolder']})")
-            else:
-                pak_descriptions.append(pak['name'])
-        
-        # Confirm removal
-        confirmation_msg = (
-            f"Are you sure you want to remove the following PAK mod(s)?\n\n"
-            f"{chr(10).join(pak_descriptions)}\n\n"
-            f"This will remove the PAK file and any related files with the same name."
-        )
-        
-        reply = QMessageBox.question(
-            self,
-            "Confirm Removal",
-            confirmation_msg,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        
-        if reply != QMessageBox.Yes:
-            return
-            
-        # Remove the PAKs
-        success_count = 0
-        fail_count = 0
-        
-        for pak in selected_paks:
-            if remove_pak(self.game_path, pak["name"]):
-                success_count += 1
-            else:
-                fail_count += 1
-                
-        # Show results
-        result_msg = f"Removed {success_count} PAK mod(s)."
-        if fail_count > 0:
-            result_msg += f"\nFailed to remove {fail_count} PAK mod(s)."
-            
-        if fail_count > 0:
-            self.show_status(result_msg, 7000, "warning")
-        else:
-            self.show_status(result_msg, 4000, "success")
-            
-        # Refresh the list
-        self._load_pak_list()
-
-    def _add_pak_clicked(self):
-        """Handle Add PAK button click."""
-        if not self.game_path:
-            self.show_status("Game path not set. Please set a valid game path first.", 6000, "error")
-            return
-            
-        # Show a dialog to choose between adding to root or subfolder
-        options = ["Add to root directory", "Add to existing subfolder", "Create new subfolder"]
-        choice, ok = QInputDialog.getItem(
-            self, 
-            "Select Installation Method", 
-            "How would you like to install the PAK mod?",
-            options,
-            0,  # Default to root directory
-            False  # Not editable
-        )
-        
-        if not ok:
-            return
-            
-        # Determine the target subfolder based on user choice
-        target_subfolder = None
-        if choice == "Add to existing subfolder":
-            # Scan for existing subfolders
-            target_dir = os.path.join(self.game_path, "Content/OblivionRemastered/Content/Paks/~mods")
-            if not os.path.exists(target_dir):
-                self.show_status("PAK mods directory not found.", 6000, "error")
-                return
-                
-            # Get subfolders
-            subfolders = [d for d in os.listdir(target_dir) 
-                        if os.path.isdir(os.path.join(target_dir, d))]
-            
-            if not subfolders:
-                self.show_status("No existing subfolders found. Creating a new one instead.", 5000, "warning")
-                choice = "Create new subfolder"
-            else:
-                subfolder, ok = QInputDialog.getItem(
-                    self,
-                    "Select Subfolder",
-                    "Choose a subfolder to install the PAK mod:",
-                    sorted(subfolders),
-                    0,
-                    False
-                )
-                
-                if not ok:
-                    return
-                    
-                target_subfolder = subfolder
-                
-        if choice == "Create new subfolder":
-            subfolder_name, ok = QInputDialog.getText(
-                self,
-                "Create Subfolder",
-                "Enter name for the new subfolder:",
-            )
-            
-            if not ok or not subfolder_name:
-                return
-                
-            # Create the subfolder
-            subfolder_path = create_subfolder(self.game_path, subfolder_name)
-            if not subfolder_path:
-                self.show_status(f"Failed to create subfolder: {subfolder_name}", 6000, "error")
-                return
-                
-            target_subfolder = subfolder_name
-            
-        # Open file dialog - only allow .pak files for selection
-        file_filter = f"PAK Files (*{PAK_EXTENSION});;All Files (*.*)"
-        
-        selected_file, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select PAK Mod File",
-            "",
-            file_filter
-        )
-        
-        if selected_file:
-            # Validate the file extension
-            if not selected_file.lower().endswith(PAK_EXTENSION):
-                self.show_status(f"The selected file must be a {PAK_EXTENSION} file. Please select a valid PAK file.", 6000, "error")
-                return
-                
-            # Show information about PAK files
-            extensions = [PAK_EXTENSION] + RELATED_EXTENSIONS
-            subfolder_info = f" in subfolder '{target_subfolder}'" if target_subfolder else ""
-            QMessageBox.information(
-                self, 
-                "PAK Mod Import", 
-                f"The manager will import the selected {PAK_EXTENSION} file and "
-                f"look for any related files with the same name but different extensions "
-                f"({', '.join(extensions)}).\n\n"
-                f"Files will be installed{subfolder_info}."
-            )
-            
-            # Try to add the PAK
-            success = add_pak(self.game_path, selected_file, target_subfolder)
-            
-            if success:
-                subfolder_msg = f" to subfolder '{target_subfolder}'" if target_subfolder else ""
-                self.show_status(f"Added PAK mod: {os.path.basename(selected_file)}{subfolder_msg}", 4000, "success")
-                self._load_pak_list()
-            else:
-                self.show_status("Failed to add PAK mod. Make sure the selected file is a valid PAK mod file.", 6000, "error")
-
     def show_settings_location(self):
         """Show the user where settings are stored and provide a summary of features and usage (formatted)."""
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Settings & Features")
-        msg.setTextFormat(Qt.TextFormat.RichText)
-        msg.setText(f"""
-        <div style='min-width:420px;'>
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Settings & Features")
+        dlg.setMinimumWidth(800)
+        dlg.setStyleSheet("""
+            QDialog {
+                background-color: #232323;
+                color: #e0e0e0;
+                font-family: 'Segoe UI', Arial, sans-serif;
+                font-size: 11pt;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+            QPushButton {
+                background-color: #292929;
+                color: #ff9800;
+                border: 1px solid #444;
+                border-radius: 4px;
+                padding: 6px 16px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #333;
+                color: #fff;
+                border: 1px solid #ff9800;
+            }
+            QPushButton:pressed {
+                background-color: #181818;
+                color: #ff9800;
+            }
+        """)
+        layout = QVBoxLayout(dlg)
+        label = QLabel(f"""
+        <div style='min-width:600px;'>
         <b>Settings Location</b><br>
-        <span style='color:#444;'>{DATA_DIR}</span><br><br>
+        <span style='color:#888;'>{DATA_DIR}</span><br><br>
         This includes game path and mod configurations.<br><hr>
         <b>jorkXL's Oblivion Remastered Mod Manager Features</b><br>
         <ul style='margin-left: -20px;'>
-        <li>Drag-and-drop mod import (<b>.zip</b>, <b>.7z</b>, <b>.rar</b>) directly onto the window</li>
+        <li>Drag-and-drop mod import (<b>.zip</b>, <b>.7z</b>) directly onto the window</li>
         <li>ESP (plugin) and PAK (archive) mod management in separate tabs</li>
         <li>Enable/disable ESP mods and reorder their load order (drag to reorder)</li>
         <li>Hide or show stock ESPs; when hidden, they always load first in default order</li>
-        <li>PAK mods can be activated, deactivated, or organized into subfolders</li>
+        <li>PAK mods can be activated and deactivated.</li>
         <li>All changes to load order are saved to <b>Plugins.txt</b> automatically</li>
         <li>Settings and mod registry are portable and stored in the above folder</li>
         <li>Double-click mods to enable/disable or activate/deactivate</li>
@@ -1284,7 +1132,7 @@ class MainWindow(QWidget):
         <li>Game path can be set or changed at any time</li>
         <li>Status messages appear at the bottom for feedback</li>
         </ul>
-        <b>Tips:</b>
+        <div style='margin-top:10px;'><b>Tips:</b></div>
         <ul style='margin-left: -20px;'>
         <li>Always set your game path before installing mods.</li>
         <li>Use the <b>Refresh</b> button if you make changes outside the manager.</li>
@@ -1292,10 +1140,14 @@ class MainWindow(QWidget):
         </ul>
         </div>
         """)
-        msg.setIcon(QMessageBox.NoIcon)
-        msg.setStandardButtons(QMessageBox.Ok)
-        msg.setMinimumWidth(500)
-        msg.exec_()
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        layout.addSpacerItem(QSpacerItem(20, 20, QSizePolicy.Minimum, QSizePolicy.Expanding))
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(dlg.accept)
+        layout.addWidget(ok_btn, alignment=Qt.AlignRight)
+        dlg.exec_()
 
     # Add a method to show status messages
     def show_status(self, message, timeout=0, msg_type="info"):
@@ -1377,6 +1229,50 @@ class MainWindow(QWidget):
                 new_order.append(line)
         write_plugins_txt(new_order)
         self.show_status("Load order updated.", 2000, "success")
+
+    def open_current_tab_folder(self):
+        """
+        Open the ESP or PAK directory depending on the selected tab.
+        """
+        current_index = self.notebook.currentIndex()
+        if current_index == 0:  # ESP Mods tab
+            esp_folder = get_esp_folder()
+            if esp_folder:
+                open_folder_in_explorer(esp_folder)
+            else:
+                self.show_status("Could not find ESP folder.", 4000, "error")
+        elif current_index == 1:  # PAK Mods tab
+            pak_folder = get_pak_target_dir(self.game_path)
+            if pak_folder:
+                open_folder_in_explorer(pak_folder)
+            else:
+                self.show_status("Could not find PAK folder.", 4000, "error")
+
+    def _process_dropped_files(self, file_paths):
+        """
+        Process a group of dropped files/folders as if they were the contents of an archive.
+        """
+        # Create a unique temp directory
+        temp_dir = os.path.join(tempfile.gettempdir(), "oblivion_mod_manager", str(uuid.uuid4()))
+        os.makedirs(temp_dir, exist_ok=True)
+        # Copy all files/folders into temp_dir
+        for path in file_paths:
+            dest = os.path.join(temp_dir, os.path.basename(path))
+            if os.path.isdir(path):
+                shutil.copytree(path, dest)
+            else:
+                shutil.copy2(path, dest)
+        # Determine mod name and subfolder
+        if len(file_paths) == 1 and os.path.isdir(file_paths[0]):
+            # Use the folder name if a single folder is dropped
+            mod_name = os.path.basename(os.path.normpath(file_paths[0]))
+            force_subfolder = mod_name
+        else:
+            # Use a default mod name with timestamp
+            mod_name = f"ManualImport_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            force_subfolder = None
+        self._install_extracted_mod(temp_dir, mod_name, force_subfolder=force_subfolder)
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 def run():
     app = QApplication(sys.argv)

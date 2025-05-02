@@ -4,13 +4,27 @@ import glob
 from pathlib import Path
 from .utils import get_game_path, load_pak_mods, save_pak_mods
 
-# --- !! IMPORTANT !! ---
-# Verify this relative path based on Oblivion Remastered's structure
-# According to user info, PAK mods are stored in:
-# The Elder Scrolls IV- Oblivion Remastered\Content\OblivionRemastered\Content\Paks\~mods
-PAK_SUBDIR = "Content/OblivionRemastered/Content/Paks/~mods"
-DISABLED_PAK_SUBDIR = "Content/OblivionRemastered/Content/Paks/disabled"
-# ---
+# --- Dynamic PAK Directory Discovery ---
+# Instead of hardcoding the full path, we search for the correct directory structure
+# This allows compatibility with different install types (Steam, Xbox, etc.)
+# The manager will find the active PAK mods directory (~mods) and create/manage the disabled directory as a sibling.
+# This is robust to different install layouts and future-proofs the mod manager.
+TARGET_PAK_SUFFIX = os.path.join("Content", "Paks", "~mods")
+DISABLED_FOLDER_NAME = "disabled"
+# --------------------------------------
+
+def _find_pak_path_suffix(base_path, target_suffix):
+    """
+    Recursively search for a directory whose absolute path ends with target_suffix.
+    This allows the mod manager to work with different install layouts (Steam, Xbox, etc.).
+    Returns the first match found, or None if not found.
+    """
+    if not os.path.isdir(base_path):
+        return None
+    for root, dirs, files in os.walk(base_path):
+        if root.endswith(target_suffix):
+            return root
+    return None
 
 # The primary file extension for PAK mods
 PAK_EXTENSION = '.pak'
@@ -21,37 +35,34 @@ RELATED_EXTENSIONS = ['.ucas', '.utoc']
 
 def get_pak_target_dir(game_path):
     """
-    Get the absolute path to the PAK mods directory.
-    
-    Args:
-        game_path (str): The game installation path
-        
-    Returns:
-        str or None: Absolute path to the PAK directory or None if invalid
+    Dynamically find the absolute path to the active PAK mods directory (~mods).
+    This supports different install types by searching for the correct directory suffix.
+    Returns None if not found.
     """
     if not game_path or not os.path.isdir(game_path):
         print(f"Error: Invalid game path: {game_path}")
         return None
-        
-    target_dir = os.path.join(game_path, PAK_SUBDIR)
+    target_dir = _find_pak_path_suffix(game_path, TARGET_PAK_SUFFIX)
+    if not target_dir:
+        print(f"Error: Could not find active PAK directory ending in '{TARGET_PAK_SUFFIX}' within {game_path}")
+        return None
     return target_dir
 
 def get_disabled_pak_dir(game_path):
     """
-    Get the absolute path to the disabled PAK mods directory.
-    
-    Args:
-        game_path (str): The game installation path
-        
-    Returns:
-        str or None: Absolute path to the disabled PAK directory or None if invalid
+    Dynamically create and return the disabled PAK mods directory as a sibling to the active directory.
+    This ensures the disabled folder is always in the correct location, regardless of install type.
+    Returns None if the active directory cannot be found.
     """
     if not game_path or not os.path.isdir(game_path):
         print(f"Error: Invalid game path: {game_path}")
         return None
-        
-    disabled_dir = os.path.join(game_path, DISABLED_PAK_SUBDIR)
-    # Make sure the directory exists
+    active_pak_dir = get_pak_target_dir(game_path)
+    if not active_pak_dir:
+        print(f"Error: Cannot determine disabled PAK directory because active PAK directory ('{TARGET_PAK_SUFFIX}') was not found in {game_path}.")
+        return None
+    pak_parent_dir = os.path.dirname(active_pak_dir)
+    disabled_dir = os.path.join(pak_parent_dir, DISABLED_FOLDER_NAME)
     os.makedirs(disabled_dir, exist_ok=True)
     return disabled_dir
 
