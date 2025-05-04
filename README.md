@@ -39,7 +39,6 @@ A streamlined tool for managing ESP plugins, PAK mods, and UE4SS script mods for
 
 - **Portable & User-Friendly**
   - All settings and mod registry are stored in a portable data folder
-  - No console window (pure GUI)
   - Tooltips and help dialogs for guidance
 
 ## Quick Start
