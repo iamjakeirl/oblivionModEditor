@@ -7,11 +7,12 @@ import uuid
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QListWidget, QListWidgetItem, QFileDialog, QMessageBox, QAbstractItemView, QCheckBox,
-    QMenu, QAction, QTabWidget, QInputDialog, QProgressDialog, QFrame, QDialog, QSpacerItem, QSizePolicy
+    QMenu, QAction, QTabWidget, QInputDialog, QProgressDialog, QFrame, QDialog, QSpacerItem, QSizePolicy,
+    QTableWidget, QTableWidgetItem
 )
 from PyQt5.QtCore import Qt, QEvent, QItemSelectionModel, QUrl, QMimeData, QTimer
 from PyQt5.QtGui import QDrag, QPixmap, QColor, QFont, QDragEnterEvent, QDropEvent
-from mod_manager.utils import get_game_path, SETTINGS_PATH, get_esp_folder, DATA_DIR, open_folder_in_explorer
+from mod_manager.utils import get_game_path, SETTINGS_PATH, get_esp_folder, DATA_DIR, open_folder_in_explorer, guess_install_type, set_install_type
 from mod_manager.registry import list_esp_files, read_plugins_txt, write_plugins_txt
 from mod_manager.pak_manager import (
     list_managed_paks, add_pak, remove_pak, scan_for_installed_paks, 
@@ -20,6 +21,7 @@ from mod_manager.pak_manager import (
 )
 import json
 import datetime
+from pathlib import Path
 
 # Import archive handling libraries
 import zipfile
@@ -54,6 +56,8 @@ EXCLUDED_ESPS = [
     'AltarGymNavigation.esp',
     'TamrielLeveledRegion.esp',
 ]
+
+from ui.install_type_dialog import InstallTypeDialog
 
 class PluginsListWidget(QListWidget):
     def __init__(self, *args, **kwargs):
@@ -127,7 +131,7 @@ class MainWindow(QWidget):
         # Add drag-and-drop hint label
         self.drag_drop_layout = QHBoxLayout()
         self.layout.addLayout(self.drag_drop_layout)
-        self.drag_drop_label = QLabel("Tip: You can drag and drop .zip or .7z archives onto this window to install mods. <b>RAR files likely will not work and must be installed manually.</b>")
+        self.drag_drop_label = QLabel("Tip: You can drag and drop .zip or .7z archives onto this window to install mods. <b>RAR files are 50/50 and may need to be installed manually.</b>")
         self.drag_drop_label.setStyleSheet("color: #888888; font-style: italic;")
         self.drag_drop_label.setAlignment(Qt.AlignCenter)
         self.drag_drop_layout.addWidget(self.drag_drop_label)
@@ -181,29 +185,53 @@ class MainWindow(QWidget):
         self.disabled_mods_list.customContextMenuRequested.connect(self.show_context_menu)
         self.esp_layout.addWidget(self.disabled_mods_list)
 
-        # Enabled mods list (from plugins.txt, uncommented only)
-        enabled_header = QWidget()
+        # Create a frame to act as the header bar
+        enabled_header = QFrame()
+        enabled_header.setFrameShape(QFrame.StyledPanel)
+        enabled_header.setFrameShadow(QFrame.Plain)
         enabled_header_layout = QHBoxLayout(enabled_header)
-        enabled_header_layout.setContentsMargins(0, 4, 0, 4)
+        enabled_header_layout.setContentsMargins(8, 2, 8, 2)
+        enabled_header.setStyleSheet("""
+            QFrame {
+                background-color: #232323;
+                border: 1px solid #333;
+            }
+            QLabel {
+                background-color: transparent;
+                border: none;
+            }
+        """)
+
+        # Create a container for the checkbox with fixed width
+        checkbox_container = QWidget()
+        checkbox_container.setFixedWidth(150)  # Increased from 120 to 150
+        checkbox_layout = QHBoxLayout(checkbox_container)
+        checkbox_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Add a spacer on the left to balance with checkbox width
-        enabled_header_layout.addStretch(1)
-        
-        # Add the centered label
-        self.enabled_mods_label = QLabel("Enabled Mods (double-click to disable, drag to reorder):")
-        self.enabled_mods_label.setStyleSheet("font-weight: bold; color: #ff9800;")
-        enabled_header_layout.addWidget(self.enabled_mods_label, 10)
-        
-        # Add the checkbox and ensure it's properly aligned
+        # Checkbox in its container
         self.hide_stock_checkbox = QCheckBox("Hide stock ESPs")
         self.hide_stock_checkbox.setChecked(True)
         self.hide_stock_checkbox.stateChanged.connect(self.refresh_lists)
-        enabled_header_layout.addWidget(self.hide_stock_checkbox, 0, Qt.AlignRight)
+        checkbox_layout.addWidget(self.hide_stock_checkbox, 0, Qt.AlignRight | Qt.AlignVCenter)
+
+        # Add empty widget with same width as checkbox container for balance
+        spacer_widget = QWidget()
+        spacer_widget.setFixedWidth(150)  # Increased from 120 to 150
+
+        # Add widgets to main layout
+        enabled_header_layout.addWidget(spacer_widget)
         
-        # Add a spacer on the right to balance with left spacer
-        enabled_header_layout.addStretch(1)
-        
-        # Add the header to the main layout
+        # Centered label (no frame/border)
+        self.enabled_mods_label = QLabel("Enabled Mods (double-click to disable, drag to reorder):")
+        self.enabled_mods_label.setStyleSheet("font-weight: bold; color: #ff9800; border: none; background: transparent;")
+        self.enabled_mods_label.setAlignment(Qt.AlignCenter)
+        self.enabled_mods_label.setFrameStyle(QFrame.NoFrame)
+        enabled_header_layout.addWidget(self.enabled_mods_label, 1, Qt.AlignCenter)
+
+        # Add checkbox container
+        enabled_header_layout.addWidget(checkbox_container)
+
+        # Add the header frame to the main layout
         self.esp_layout.addWidget(enabled_header)
 
         self.enabled_mods_list = PluginsListWidget()
@@ -242,7 +270,7 @@ class MainWindow(QWidget):
         self.pak_frame.setLayout(self.pak_layout)
         
         # Inactive PAK mods list
-        self.inactive_pak_label = QLabel("Inactive PAKs (double-click to activate):")
+        self.inactive_pak_label = QLabel("Disabled PAKs (double-click to activate):")
         self.inactive_pak_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.inactive_pak_label.setAlignment(Qt.AlignCenter)
         self.pak_layout.addWidget(self.inactive_pak_label)
@@ -256,7 +284,7 @@ class MainWindow(QWidget):
         self.pak_layout.addWidget(self.inactive_pak_listbox)
         
         # Active PAK mods list
-        self.active_pak_label = QLabel("Active PAKs (double-click to deactivate):")
+        self.active_pak_label = QLabel("Enabled PAKs (double-click to deactivate):")
         self.active_pak_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.active_pak_label.setAlignment(Qt.AlignCenter)
         self.pak_layout.addWidget(self.active_pak_label)
@@ -280,6 +308,63 @@ class MainWindow(QWidget):
         
         # Add PAK tab to notebook
         self.notebook.addTab(self.pak_frame, "PAK Mods")
+
+        # --- UE4SS TAB ----------------------------------------------------
+        self.ue4ss_frame = QWidget()
+        self.ue4ss_layout = QVBoxLayout()
+        self.ue4ss_frame.setLayout(self.ue4ss_layout)
+
+        # Disabled UE4SS mods list (top)
+        self.ue4ss_disabled_label = QLabel("Disabled UE4SS Mods (double-click to enable):")
+        self.ue4ss_disabled_label.setStyleSheet("font-weight: bold; color: #ff9800;")
+        self.ue4ss_disabled_label.setAlignment(Qt.AlignCenter)
+        self.ue4ss_layout.addWidget(self.ue4ss_disabled_label)
+        self.ue4ss_disabled_list = QListWidget()
+        self.ue4ss_disabled_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.ue4ss_disabled_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.ue4ss_disabled_list.itemDoubleClicked.connect(self.enable_ue4ss_mod)
+        self.ue4ss_disabled_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.ue4ss_disabled_list.customContextMenuRequested.connect(self._show_ue4ss_context_menu)
+        self.ue4ss_layout.addWidget(self.ue4ss_disabled_list)
+
+        # Enabled UE4SS mods list (bottom)
+        self.ue4ss_enabled_label = QLabel("Enabled UE4SS Mods (double-click to disable):")
+        self.ue4ss_enabled_label.setStyleSheet("font-weight: bold; color: #ff9800;")
+        self.ue4ss_enabled_label.setAlignment(Qt.AlignCenter)
+        self.ue4ss_layout.addWidget(self.ue4ss_enabled_label)
+        self.ue4ss_enabled_list = QListWidget()
+        self.ue4ss_enabled_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.ue4ss_enabled_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.ue4ss_enabled_list.itemDoubleClicked.connect(self.disable_ue4ss_mod)
+        self.ue4ss_enabled_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.ue4ss_enabled_list.customContextMenuRequested.connect(self._show_ue4ss_context_menu)
+        self.ue4ss_layout.addWidget(self.ue4ss_enabled_list)
+
+        # status label (updated by _refresh_ue4ss_status)
+        self.ue4ss_status = QLabel("")
+        self.ue4ss_status.setAlignment(Qt.AlignCenter)
+        self.ue4ss_status.setStyleSheet("font-weight:bold; color:#ff9800;")
+        self.ue4ss_layout.addWidget(self.ue4ss_status)
+
+        # button row
+        self.ue4ss_btn_row = QHBoxLayout()
+        self.ue4ss_action_btn = QPushButton()
+        self.ue4ss_action_btn.clicked.connect(self._on_ue4ss_action)
+        self.ue4ss_btn_row.addWidget(self.ue4ss_action_btn)
+
+        self.ue4ss_disable_btn = QPushButton()
+        self.ue4ss_disable_btn.clicked.connect(self._toggle_ue4ss_enabled)
+        self.ue4ss_btn_row.addWidget(self.ue4ss_disable_btn)
+
+        self.ue4ss_refresh_btn = QPushButton("Refresh")
+        self.ue4ss_refresh_btn.clicked.connect(self._refresh_ue4ss_status)
+        self.ue4ss_btn_row.addWidget(self.ue4ss_refresh_btn)
+
+        self.ue4ss_layout.addLayout(self.ue4ss_btn_row)
+
+        # optional future list of UE4SS script mods can be added here
+        self.notebook.addTab(self.ue4ss_frame, "UE4SS")
+        # ------------------------------------------------------------------
 
         # Add a status message area at the bottom of the window
         self.status_frame = QFrame()
@@ -403,6 +488,11 @@ class MainWindow(QWidget):
                 color: #e0e0e0;
             }
         """)
+
+        self._refresh_ue4ss_status()
+
+        # Connect tab change handler
+        self.notebook.currentChanged.connect(self._on_tab_changed)
 
     # Add drag and drop event handlers
     def dragEnterEvent(self, event: QDragEnterEvent):
@@ -573,6 +663,16 @@ class MainWindow(QWidget):
                 elif filename.lower().endswith(PAK_EXTENSION):
                     pak_files.append(filepath)
         
+        # --- Detect UE4SS-style folders ---
+        ue4ss_mod_folders = []
+        for root, dirs, files in os.walk(extract_dir):
+            if any(f.lower().endswith(".lua") for f in files) and \
+               os.path.basename(root).lower() == "scripts":
+                mod_root = Path(root).parent  # FolderX
+                ue4ss_mod_folders.append(mod_root)
+        ue4ss_mod_folders = list({p for p in ue4ss_mod_folders})  # dedupe
+        # --- End UE4SS detection ---
+        
         # Process ESP files
         installed_esp = 0
         installed_esp_names = []  # Track the names of installed ESPs for auto-enabling
@@ -607,6 +707,9 @@ class MainWindow(QWidget):
                 error_msg = f"Failed to install {os.path.basename(esp_path)}: {str(e)}"
                 self.show_status(f"Error: {error_msg}", 10000, "error")
                 
+        if installed_esp:
+            self.refresh_lists()  # Refresh ESP tab after installing ESPs
+        
         # Process PAK files
         installed_pak = 0
         for pak_path in pak_files:
@@ -622,10 +725,27 @@ class MainWindow(QWidget):
                 result = add_pak(self.game_path, pak_path, subfolder)
                 if result:
                     installed_pak += 1
-                    
+            
             except Exception as e:
                 error_msg = f"Failed to install {os.path.basename(pak_path)}: {str(e)}"
                 self.show_status(f"Error: {error_msg}", 10000, "error")
+        
+        if installed_pak:
+            self._load_pak_list()  # Refresh PAK tab after installing PAKs
+        
+        # --- Install detected UE4SS mods ---
+        installed_ue4ss = 0
+        if ue4ss_mod_folders:
+            from mod_manager.ue4ss_installer import add_ue4ss_mod, ue4ss_installed
+            ok, _ = ue4ss_installed(self.game_path)
+            if not ok:
+                self.show_status("UE4SS not installed – skipping UE4SS mods.", 6000, "warning")
+            else:
+                for mod_dir in ue4ss_mod_folders:
+                    if add_ue4ss_mod(self.game_path, mod_dir):
+                        installed_ue4ss += 1
+                self._refresh_ue4ss_status()  # Refresh UE4SS tab after installing mods
+        # --- End UE4SS mod install ---
         
         # Enable all installed ESPs by adding them to the end of plugins.txt
         if installed_esp_names:
@@ -638,7 +758,8 @@ class MainWindow(QWidget):
             write_plugins_txt(plugins)
         
         # Show summary in status bar instead of a popup
-        summary = f"Installed {installed_esp} ESP file(s) and {installed_pak} PAK file(s) from {mod_name}."
+        summary = (f"Installed {installed_esp} ESP, {installed_pak} PAK, "
+                   f"{installed_ue4ss} UE4SS mod(s) from {mod_name}.")
         self.show_status(summary, 8000, "success")
         
         # Refresh the lists to show the newly enabled ESPs
@@ -773,6 +894,12 @@ class MainWindow(QWidget):
     def browse_path(self):
         path = QFileDialog.getExistingDirectory(self, "Select Oblivion Remastered Folder")
         if path:
+            # Show install-type dialog after verifying path is a directory
+            default_guess = guess_install_type(path)
+            dlg = InstallTypeDialog(default_guess, self)
+            if dlg.exec_() != QDialog.Accepted:
+                return  # user cancelled
+            set_install_type(dlg.selected())
             self.path_input.setText(path)
             # Automatically save the path after browsing
             self.save_game_path()
@@ -1232,7 +1359,7 @@ class MainWindow(QWidget):
 
     def open_current_tab_folder(self):
         """
-        Open the ESP or PAK directory depending on the selected tab.
+        Open the ESP, PAK, or UE4SS directory depending on the selected tab.
         """
         current_index = self.notebook.currentIndex()
         if current_index == 0:  # ESP Mods tab
@@ -1247,6 +1374,13 @@ class MainWindow(QWidget):
                 open_folder_in_explorer(pak_folder)
             else:
                 self.show_status("Could not find PAK folder.", 4000, "error")
+        elif current_index == 2:  # UE4SS tab
+            from mod_manager.ue4ss_installer import get_ue4ss_bin_dir
+            ue4ss_folder = get_ue4ss_bin_dir(self.game_path)
+            if ue4ss_folder and os.path.isdir(ue4ss_folder):
+                open_folder_in_explorer(ue4ss_folder)
+            else:
+                self.show_status("UE4SS folder not found.", 4000, "error")
 
     def _process_dropped_files(self, file_paths):
         """
@@ -1273,6 +1407,264 @@ class MainWindow(QWidget):
             force_subfolder = None
         self._install_extracted_mod(temp_dir, mod_name, force_subfolder=force_subfolder)
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def _refresh_ue4ss_status(self):
+        from mod_manager.ue4ss_installer import ue4ss_installed, get_ue4ss_bin_dir, read_ue4ss_mods_txt
+        import os
+        if not self.game_path:
+            self.ue4ss_status.setText("No game path set.")
+            self.ue4ss_enabled_list.clear()
+            self.ue4ss_disabled_list.clear()
+            return
+        ok, version = ue4ss_installed(self.game_path)
+        enabled, disabled = read_ue4ss_mods_txt(self.game_path)
+        # Filter out default/sentinel mods
+        default_mods = {
+            "CheatManagerEnablerMod", "ConsoleCommandsMod", "ConsoleEnablerMod",
+            "SplitScreenMod", "LineTraceMod", "BPML_GenericFunctions", "BPModLoaderMod", "Keybinds"
+        }
+        sentinel = "; Built-in keybinds, do not move up!"
+        enabled = [mod for mod in enabled if mod not in default_mods and mod != sentinel]
+        disabled = [mod for mod in disabled if mod not in default_mods and mod != sentinel]
+        self.ue4ss_enabled_list.clear()
+        self.ue4ss_disabled_list.clear()
+        for mod in sorted(enabled, key=str.lower):
+            self.ue4ss_enabled_list.addItem(mod)
+        for mod in sorted(disabled, key=str.lower):
+            self.ue4ss_disabled_list.addItem(mod)
+        if ok:
+            msg = f"UE4SS detected (version: {version}) in\n{get_ue4ss_bin_dir(self.game_path)}"
+        else:
+            msg = "UE4SS not installed."
+        msg += f"\nEnabled: {len(enabled)} | Disabled: {len(disabled)}"
+        self.ue4ss_status.setText(msg)
+        self._update_ue4ss_btns()
+
+    def enable_ue4ss_mod(self, item):
+        from mod_manager.ue4ss_installer import set_ue4ss_mod_enabled
+        mod = item.text()
+        set_ue4ss_mod_enabled(self.game_path, mod, True)
+        self._refresh_ue4ss_status()
+
+    def disable_ue4ss_mod(self, item):
+        from mod_manager.ue4ss_installer import set_ue4ss_mod_enabled
+        mod = item.text()
+        set_ue4ss_mod_enabled(self.game_path, mod, False)
+        self._refresh_ue4ss_status()
+
+    def _install_update_ue4ss(self):
+        from mod_manager.ue4ss_installer import install_ue4ss
+        from mod_manager.utils import get_install_type, DATA_DIR
+        import os, shutil
+        # Check for disabled UE4SS
+        disabled_dir = DATA_DIR / "disabled_ue4ss"
+        if (disabled_dir / "dwmapi.dll").exists() or (disabled_dir / "UE4SS").exists():
+            from PyQt5.QtWidgets import QMessageBox
+            reply = QMessageBox.warning(
+                self,
+                "Warning: Disabled UE4SS Present",
+                "A disabled version of UE4SS is currently stored in your settings folder.\n"
+                "If you proceed with installation, the disabled version will be deleted.\n\nContinue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                self.show_status("UE4SS install cancelled.", 4000, "info")
+                return
+            # User confirmed, delete disabled version
+            try:
+                if (disabled_dir / "dwmapi.dll").exists():
+                    os.remove(disabled_dir / "dwmapi.dll")
+                if (disabled_dir / "UE4SS").exists():
+                    shutil.rmtree(disabled_dir / "UE4SS")
+            except Exception as e:
+                self.show_status(f"Failed to remove old disabled UE4SS: {e}", 8000, "error")
+                return
+        if not self.game_path:
+            self.show_status("Set game path first.", 6000, "error")
+            return
+        itype = get_install_type()
+        if not itype:
+            self.show_status("Install type not set. Re‑select game folder.", 6000, "error")
+            return
+        dlg = QProgressDialog("Installing UE4SS…", "Cancel", 0, 0, self)
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.show()
+        ok, err = install_ue4ss(self.game_path, itype)
+        dlg.close()
+        if ok:
+            self.show_status("UE4SS installed.", 5000, "success")
+        else:
+            self.show_status(f"UE4SS install failed: {err}", 8000, "error")
+        self._refresh_ue4ss_status()
+
+    def _uninstall_ue4ss(self):
+        from mod_manager.ue4ss_installer import uninstall_ue4ss
+        if not self.game_path:
+            self.show_status("Set game path first.", 6000, "error")
+            return
+        from PyQt5.QtWidgets import QMessageBox
+        reply = QMessageBox.warning(
+            self,
+            "Uninstall UE4SS",
+            "Uninstalling UE4SS will also delete all UE4SS mods/scripts (the entire UE4SS folder).\n\nAre you sure you want to continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            self.show_status("UE4SS uninstall cancelled.", 4000, "info")
+            return
+        if uninstall_ue4ss(self.game_path):
+            self.show_status("UE4SS uninstalled.", 5000, "success")
+        else:
+            self.show_status("UE4SS uninstall failed.", 8000, "error")
+        self._refresh_ue4ss_status()
+
+    def _show_ue4ss_context_menu(self, position):
+        sender = self.sender()
+        current_item = sender.currentItem()
+        if not current_item:
+            return
+        mod_name = current_item.text()
+        # Create context menu
+        context_menu = QMenu(self)
+        remove_action = QAction("Remove UE4SS Mod", self)
+        remove_action.triggered.connect(lambda: self._remove_ue4ss_mod(mod_name))
+        context_menu.addAction(remove_action)
+        context_menu.exec_(sender.mapToGlobal(position))
+
+    def _remove_ue4ss_mod(self, mod_name):
+        from mod_manager.ue4ss_installer import get_ue4ss_mods_dir
+        import shutil
+        from PyQt5.QtWidgets import QMessageBox
+        mods_dir = get_ue4ss_mods_dir(self.game_path)
+        mod_path = mods_dir / mod_name if mods_dir else None
+        if not mod_path or not mod_path.exists():
+            self.show_status(f"Mod folder not found: {mod_name}", 6000, "error")
+            return
+        reply = QMessageBox.question(
+            self,
+            "Confirm Removal",
+            f"Are you sure you want to permanently delete UE4SS mod '{mod_name}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            shutil.rmtree(mod_path)
+            # Remove from mods.txt
+            from mod_manager.ue4ss_installer import get_ue4ss_bin_dir
+            bin_dir = get_ue4ss_bin_dir(self.game_path)
+            mods_file = bin_dir / "UE4SS" / "Mods" / "mods.txt" if bin_dir else None
+            if mods_file and mods_file.exists():
+                lines = mods_file.read_text(encoding="utf-8").splitlines()
+                lines = [l for l in lines if not l.strip().startswith(mod_name)]
+                mods_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            self.show_status(f"UE4SS mod '{mod_name}' was deleted successfully.", 4000, "success")
+            self._refresh_ue4ss_status()
+        except Exception as e:
+            self.show_status(f"Failed to delete UE4SS mod '{mod_name}': {str(e)}", 10000, "error")
+
+    def _on_tab_changed(self, idx: int):
+        """Fire when user switches tabs; display non‑intrusive UE4SS guidance."""
+        if self.notebook.widget(idx) is self.ue4ss_frame:
+            self._refresh_ue4ss_status()      # ensure label up‑to‑date
+            if "not installed" in self.ue4ss_status.text().lower():
+                self.show_status(
+                    "UE4SS is optional. Install only if you plan to use mods that require it.",
+                    8000,
+                    "info"
+                )
+
+    def _toggle_ue4ss_enabled(self):
+        from mod_manager.ue4ss_installer import get_ue4ss_bin_dir
+        from mod_manager.utils import DATA_DIR
+        import shutil, os
+        bin_dir = get_ue4ss_bin_dir(self.game_path)
+        disabled_dir = DATA_DIR / "disabled_ue4ss"
+        dll_disabled = disabled_dir / "dwmapi.dll"
+        ue4ss_disabled = disabled_dir / "UE4SS"
+        # If disabled files exist, enable
+        if dll_disabled.exists() or ue4ss_disabled.exists():
+            if not bin_dir:
+                self.show_status("Game binary directory not found to re-enable UE4SS.", 5000, "error")
+                return
+            try:
+                # Move back dwmapi.dll
+                if dll_disabled.exists():
+                    shutil.move(str(dll_disabled), str(bin_dir / "dwmapi.dll"))
+                # Move back UE4SS folder
+                if ue4ss_disabled.exists():
+                    dest_folder = bin_dir / "UE4SS"
+                    if dest_folder.exists():
+                        shutil.rmtree(dest_folder)
+                    shutil.move(str(ue4ss_disabled), str(dest_folder))
+                self.show_status("UE4SS has been re-enabled.", 6000, "success")
+            except Exception as e:
+                self.show_status(f"Failed to re-enable UE4SS: {e}", 8000, "error")
+                return
+        else:
+            # Otherwise, disable
+            self._disable_ue4ss()
+        self._refresh_ue4ss_status()
+        self._update_ue4ss_btns()
+
+    def _update_ue4ss_btns(self):
+        from mod_manager.ue4ss_installer import ue4ss_installed
+        ok, _ = ue4ss_installed(self.game_path)
+        if ok:
+            self.ue4ss_action_btn.setText("Uninstall UE4SS")
+        else:
+            self.ue4ss_action_btn.setText("Install UE4SS")
+        from mod_manager.utils import DATA_DIR
+        disabled_dir = DATA_DIR / "disabled_ue4ss"
+        dll_disabled = disabled_dir / "dwmapi.dll"
+        ue4ss_disabled = disabled_dir / "UE4SS"
+        if dll_disabled.exists() or ue4ss_disabled.exists():
+            self.ue4ss_disable_btn.setText("Enable UE4SS")
+        else:
+            self.ue4ss_disable_btn.setText("Disable UE4SS")
+
+    def _disable_ue4ss(self):
+        from mod_manager.ue4ss_installer import get_ue4ss_bin_dir
+        from mod_manager.utils import DATA_DIR
+        import shutil, os
+        bin_dir = get_ue4ss_bin_dir(self.game_path)
+        if not bin_dir:
+            self.show_status("UE4SS not found to disable.", 5000, "error")
+            return
+        disabled_dir = DATA_DIR / "disabled_ue4ss"
+        os.makedirs(disabled_dir, exist_ok=True)
+        # Move dwmapi.dll
+        dll_path = bin_dir / "dwmapi.dll"
+        if dll_path.exists():
+            try:
+                shutil.move(str(dll_path), str(disabled_dir / "dwmapi.dll"))
+            except Exception as e:
+                self.show_status(f"Failed to move dwmapi.dll: {e}", 8000, "error")
+                return
+        # Move UE4SS folder
+        ue4ss_folder = bin_dir / "UE4SS"
+        if ue4ss_folder.exists() and ue4ss_folder.is_dir():
+            try:
+                dest_folder = disabled_dir / "UE4SS"
+                if dest_folder.exists():
+                    shutil.rmtree(dest_folder)
+                shutil.move(str(ue4ss_folder), str(disabled_dir / "UE4SS"))
+            except Exception as e:
+                self.show_status(f"Failed to move UE4SS folder: {e}", 8000, "error")
+                return
+        self.show_status("UE4SS has been disabled and preserved in settings folder.", 6000, "success")
+        self._refresh_ue4ss_status()
+
+    def _on_ue4ss_action(self):
+        from mod_manager.ue4ss_installer import ue4ss_installed
+        ok, _ = ue4ss_installed(self.game_path)
+        if ok:
+            self._uninstall_ue4ss()
+        else:
+            self._install_update_ue4ss()
 
 def run():
     app = QApplication(sys.argv)

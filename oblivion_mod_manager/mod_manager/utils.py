@@ -101,4 +101,34 @@ def open_folder_in_explorer(path):
         return True
     except Exception as e:
         print(f"Error opening folder in Explorer: {e}")
-        return False 
+        return False
+
+# UE4SS support
+UE4SS_URL = "https://github.com/UE4SS-RE/RE-UE4SS/releases/download/experimental-latest/UE4SS_v3.0.1-394-g437a8ff.zip"
+UE4SS_VERSION = "v3.0.1-394-g437a8ff"
+
+def get_install_type():
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f).get("install_type")
+    except Exception:
+        return None
+
+def set_install_type(t):
+    data = {}
+    if SETTINGS_PATH.exists():
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            content = f.read()
+            if content:
+                data = json.loads(content)
+    data["install_type"] = t
+    with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+def guess_install_type(game_root: str) -> str:
+    p = game_root.lower()
+    if r"\steam\steamapps\common" in p:
+        return "steam"
+    if r"\xboxgames" in p:
+        return "gamepass"
+    return "unknown" 
