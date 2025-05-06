@@ -265,20 +265,40 @@ def deactivate_pak(game_path, pak_info):
     Returns:
         bool: True if successful, False otherwise
     """
-    source_dir = get_pak_target_dir(game_path)
-    if not source_dir:
+    paks_root = get_paks_root_dir(game_path)
+    if not paks_root:
         return False
     disabled_dir = get_disabled_pak_dir(game_path)
     if not disabled_dir:
         return False
-    # Get the subfolder path if any (always relative to root)
+        
+    # Handle regular mods vs LogicMods differently
     subfolder = pak_info.get("subfolder")
-    if subfolder:
-        source_dir = os.path.join(source_dir, subfolder)
-        target_dir = os.path.join(disabled_dir, subfolder)
-        os.makedirs(target_dir, exist_ok=True)
+    if subfolder and subfolder.startswith("LogicMods"):
+        # This is a LogicMods pak file
+        if subfolder == "LogicMods":
+            # It's directly in LogicMods folder
+            source_dir = os.path.join(paks_root, "LogicMods")
+            target_dir = disabled_dir  # Move to root of disabled dir
+        else:
+            # It's in a subfolder of LogicMods
+            # Extract the part after "LogicMods/"
+            subpath = subfolder[len("LogicMods")+1:]  # +1 for the path separator
+            source_dir = os.path.join(paks_root, "LogicMods", subpath)
+            target_dir = os.path.join(disabled_dir, subpath)
+            os.makedirs(target_dir, exist_ok=True)
     else:
-        target_dir = disabled_dir
+        # Regular mod in ~mods directory
+        source_dir = get_pak_target_dir(game_path)
+        if not source_dir:
+            return False
+            
+        if subfolder:
+            source_dir = os.path.join(source_dir, subfolder)
+            target_dir = os.path.join(disabled_dir, subfolder)
+            os.makedirs(target_dir, exist_ok=True)
+        else:
+            target_dir = disabled_dir
     
     # Get all files to move
     files_to_move = []
@@ -311,6 +331,11 @@ def deactivate_pak(game_path, pak_info):
                 pak["files"] = [target for _, target in moved_files]
                 # Mark as disabled
                 pak["active"] = False
+                
+                # Remember if this was from LogicMods to restore correctly later
+                if subfolder and subfolder.startswith("LogicMods"):
+                    pak["from_logicmods"] = True
+                
                 break
         
         # Save the updated list
@@ -320,7 +345,7 @@ def deactivate_pak(game_path, pak_info):
                 # Check if source subfolder is empty
                 if os.path.exists(source_dir) and not os.listdir(source_dir):
                     os.rmdir(source_dir)
-                    print(f"Removed empty subfolder: {pak_info['subfolder']}")
+                    print(f"Removed empty subfolder: {subfolder}")
             
             print(f"PAK mod {pak_info['name']} successfully deactivated")
             return True
@@ -356,20 +381,63 @@ def activate_pak(game_path, pak_info):
     Returns:
         bool: True if successful, False otherwise
     """
+    paks_root = get_paks_root_dir(game_path)
+    if not paks_root:
+        return False
     disabled_dir = get_disabled_pak_dir(game_path)
     if not disabled_dir:
         return False
-    target_dir = get_pak_target_dir(game_path)
-    if not target_dir:
-        return False
-    # Get the subfolder path if any (always relative to root)
+        
+    # Handle regular mods vs LogicMods differently
     subfolder = pak_info.get("subfolder")
-    if subfolder:
-        source_dir = os.path.join(disabled_dir, subfolder)
-        target_dir = os.path.join(target_dir, subfolder)
-        os.makedirs(target_dir, exist_ok=True)
+    if subfolder and subfolder.startswith("DisabledMods"):
+        # This is a disabled mod that was originally from LogicMods or regular folder
+        if subfolder == "DisabledMods":
+            # It's directly in DisabledMods folder, move back to LogicMods
+            source_dir = disabled_dir
+            # Determine if it was originally from LogicMods based on metadata
+            if pak_info.get("from_logicmods", False):
+                target_dir = os.path.join(paks_root, "LogicMods")
+                # Update subfolder in pak_info
+                pak_info["subfolder"] = "LogicMods"
+            else:
+                target_dir = get_pak_target_dir(game_path)
+                # Reset subfolder in pak_info
+                pak_info["subfolder"] = None
+        else:
+            # It's in a subfolder of DisabledMods
+            # Extract the part after "DisabledMods/"
+            subpath = subfolder[len("DisabledMods")+1:]
+            source_dir = os.path.join(disabled_dir, subpath)
+            
+            # Determine if it was originally from LogicMods based on metadata
+            if pak_info.get("from_logicmods", False) or subpath.startswith("LogicMods"):
+                # If it was from LogicMods or the subpath still indicates LogicMods
+                if subpath.startswith("LogicMods"):
+                    # The subpath already contains LogicMods prefix
+                    logicmods_subpath = subpath[len("LogicMods")+1:]  # +1 for separator
+                    target_dir = os.path.join(paks_root, "LogicMods", logicmods_subpath)
+                    pak_info["subfolder"] = subpath  # Keep the full path
+                else:
+                    target_dir = os.path.join(paks_root, "LogicMods", subpath)
+                    pak_info["subfolder"] = f"LogicMods/{subpath}"
+            else:
+                target_dir = os.path.join(get_pak_target_dir(game_path), subpath)
+                pak_info["subfolder"] = subpath
+            
+            os.makedirs(target_dir, exist_ok=True)
     else:
-        source_dir = disabled_dir
+        # Normal case - it's a regular subfolder or no subfolder
+        target_dir = get_pak_target_dir(game_path)
+        if not target_dir:
+            return False
+            
+        if subfolder:
+            source_dir = os.path.join(disabled_dir, subfolder)
+            target_dir = os.path.join(target_dir, subfolder)
+            os.makedirs(target_dir, exist_ok=True)
+        else:
+            source_dir = disabled_dir
     
     # Get all files to move
     files_to_move = []
@@ -446,14 +514,14 @@ def scan_for_installed_paks(game_path):
     if not paks_root or not os.path.isdir(paks_root):
         return []
     found_paks = []
-    # Walk all subfolders in custom mods dir except LogicMods and disabled
+    # Walk all subfolders in custom mods dir except disabled
     mods_dir = os.path.join(paks_root, get_custom_mod_dir_name())
     if os.path.isdir(mods_dir):
         for root, dirs, files in os.walk(mods_dir):
-            # Skip LogicMods and disabled
+            # Skip disabled
             rel = os.path.relpath(root, mods_dir)
             parts = rel.split(os.sep)
-            if "LogicMods" in parts or DISABLED_FOLDER_NAME in parts:
+            if DISABLED_FOLDER_NAME in parts:
                 continue
             pak_files = [f for f in files if f.lower().endswith(PAK_EXTENSION) and not is_default_pak_file(f)]
             subfolder = None if rel == "." else rel
@@ -475,13 +543,39 @@ def scan_for_installed_paks(game_path):
                     "subfolder": subfolder,
                     "active": True
                 })
+                
+    # Also scan LogicMods directory
+    logicmods_dir = os.path.join(paks_root, "LogicMods")
+    if os.path.isdir(logicmods_dir):
+        for root, dirs, files in os.walk(logicmods_dir):
+            rel = os.path.relpath(root, logicmods_dir)
+            pak_files = [f for f in files if f.lower().endswith(PAK_EXTENSION) and not is_default_pak_file(f)]
+            subfolder = "LogicMods" if rel == "." else os.path.join("LogicMods", rel)
+            for pak_file in pak_files:
+                base_name = os.path.splitext(pak_file)[0]
+                related_files = get_related_files(root, base_name)
+                if any(is_default_pak_file(f) for f in related_files):
+                    continue
+                pak_path = os.path.join(root, pak_file)
+                if pak_path not in related_files:
+                    related_files.append(pak_path)
+                extensions = sorted(set(os.path.splitext(f)[1].lower() for f in related_files))
+                found_paks.append({
+                    "name": pak_file,
+                    "base_name": base_name,
+                    "files": related_files,
+                    "extensions": extensions,
+                    "subfolder": subfolder,
+                    "active": True
+                })
+                
     # Scan disabled mods as before, but use relative to disabled_dir
     disabled_dir = get_disabled_pak_dir(game_path)
-    if disabled_dir and os.path.isdir(disabled_dir):
+    if disabled_dir:
         for root, dirs, files in os.walk(disabled_dir):
             rel = os.path.relpath(root, disabled_dir)
             pak_files = [f for f in files if f.lower().endswith(PAK_EXTENSION) and not is_default_pak_file(f)]
-            subfolder = None if rel == "." else rel
+            subfolder = "DisabledMods" if rel == "." else os.path.join("DisabledMods", rel)
             for pak_file in pak_files:
                 base_name = os.path.splitext(pak_file)[0]
                 related_files = get_related_files(root, base_name)

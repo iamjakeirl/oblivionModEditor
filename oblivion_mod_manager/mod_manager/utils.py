@@ -2,6 +2,8 @@ import os
 import json
 import sys
 from pathlib import Path
+import filecmp
+import shutil
 
 # For Windows standard application data location
 def get_app_data_dir():
@@ -230,4 +232,27 @@ def delete_display_info(mod_id: str):
     data = _load_display()
     if mod_id in data:
         del data[mod_id]
-        _save_display(data) 
+        _save_display(data)
+
+def _merge_tree(src_dir: str, dest_dir: str):
+    """
+    Recursively copy src_dir into dest_dir.
+    • Directories are created as needed.
+    • If a file with the same name already exists at the destination and is
+      byte‑identical, it is skipped; otherwise it is overwritten.
+    """
+    for root, _, files in os.walk(src_dir):
+        rel = os.path.relpath(root, src_dir)
+        target_root = dest_dir if rel == "." else os.path.join(dest_dir, rel)
+        os.makedirs(target_root, exist_ok=True)
+        for fname in files:
+            src = os.path.join(root, fname)
+            dst = os.path.join(target_root, fname)
+            try:
+                # skip identical file
+                if os.path.exists(dst) and filecmp.cmp(src, dst, shallow=False):
+                    continue
+                shutil.copy2(src, dst)
+            except Exception:
+                # best‑effort copy; ignore single‑file failures
+                pass 

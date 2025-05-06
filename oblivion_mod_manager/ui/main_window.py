@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QEvent, QItemSelectionModel, QUrl, QMimeData, QTimer, QByteArray, QSortFilterProxyModel
 from PyQt5.QtGui import QDrag, QPixmap, QColor, QFont, QDragEnterEvent, QDropEvent
-from mod_manager.utils import get_game_path, SETTINGS_PATH, get_esp_folder, DATA_DIR, open_folder_in_explorer, guess_install_type, set_install_type, load_settings, save_settings, get_custom_mod_dir_name
+from mod_manager.utils import get_game_path, SETTINGS_PATH, get_esp_folder, DATA_DIR, open_folder_in_explorer, guess_install_type, set_install_type, load_settings, save_settings, get_custom_mod_dir_name, _merge_tree
 from mod_manager.registry import list_esp_files, read_plugins_txt, write_plugins_txt
 from mod_manager.pak_manager import (
     list_managed_paks, add_pak, remove_pak, scan_for_installed_paks, 
@@ -28,6 +28,7 @@ import zipfile
 import py7zr
 import rarfile
 from pyunpack import Archive
+import filecmp
 
 # Note: rarfile library requires unrar executable to be installed on the system or in PATH
 # If not available, we'll fall back to pyunpack which uses whatever extractor is available
@@ -789,28 +790,28 @@ class MainWindow(QWidget):
             _merge_tree(mods_src, custom_dir)
             self.show_status(f"Merged ~mods from archive into {custom_dir}.", 5000, "success")
         # Merge LogicMods from archive if present
-        logicmods_src = os.path.join(extract_dir, "LogicMods")
-        if os.path.isdir(logicmods_src) and paks_root:
+        logicmods_dirs = []
+        for root, dirs, files in os.walk(extract_dir):
+            if os.path.basename(root).lower() == "logicmods":
+                logicmods_dirs.append(root)
+
+        for logicmods_src in logicmods_dirs:
             logicmods_dest = os.path.join(paks_root, "LogicMods")
-            os.makedirs(logicmods_dest, exist_ok=True)
-            for root, dirs, files in os.walk(logicmods_src):
-                rel_root = os.path.relpath(root, logicmods_src)
-                dest_root = os.path.join(logicmods_dest, rel_root) if rel_root != "." else logicmods_dest
-                os.makedirs(dest_root, exist_ok=True)
-                for file in files:
-                    src_file = os.path.join(root, file)
-                    dest_file = os.path.join(dest_root, file)
-                    try:
-                        shutil.copy2(src_file, dest_file)
-                    except Exception as e:
-                        self.show_status(f"Error copying LogicMods file: {file}: {e}", 10000, "error")
-            self.show_status(f"Merged LogicMods from archive into {logicmods_dest}.", 5000, "success")
+            _merge_tree(logicmods_src, logicmods_dest)
+            self.show_status(
+                f"Merged LogicMods from archive into {logicmods_dest}.",
+                5000, "success"
+            )
         # --- End ~mods and LogicMods merge logic ---
         
         # Find ESP and PAK files in the extracted content, skipping ~mods and LogicMods
         esp_files = []
         pak_files = []
-        skip_dirs = {os.path.abspath(os.path.join(extract_dir, "~mods")), os.path.abspath(os.path.join(extract_dir, "LogicMods"))}
+        skip_dirs = {
+            os.path.abspath(os.path.join(extract_dir, "~mods")),
+        }
+        # also skip any LogicMods folder we just merged
+        skip_dirs.update({os.path.abspath(d) for d in logicmods_dirs})
         for root, _, files in os.walk(extract_dir):
             abs_root = os.path.abspath(root)
             # Skip any files inside ~mods or LogicMods in the extracted archive
@@ -1327,10 +1328,12 @@ QTableView {
         src_index = proxy.mapToSource(index)
         row = src_index.row()
         mod_id = model._rows[row]["id"]
+        pak_info = model._rows[row]["pak_info"]
         from PyQt5.QtWidgets import QMenu, QInputDialog, QMessageBox
         menu = QMenu(self)
         rename_action = menu.addAction("Rename Display Name…")
         group_action = menu.addAction("Set Group…")
+        delete_action = menu.addAction("Delete PAK Mod")
         action = menu.exec_(table.viewport().mapToGlobal(pos))
         if action == rename_action:
             current = model._rows[row]["real"]
@@ -1363,6 +1366,28 @@ QTableView {
                 from PyQt5.QtCore import QTimer
                 QTimer.singleShot(0, self._load_pak_list)
                 return  # Prevent use of stale model/proxy
+        elif action == delete_action:
+            self.delete_pak_mod(pak_info)
+            return
+
+    def delete_pak_mod(self, pak_info):
+        from PyQt5.QtWidgets import QMessageBox
+        from mod_manager.pak_manager import remove_pak
+        reply = QMessageBox.question(
+            self,
+            "Confirm Deletion",
+            f"Are you sure you want to permanently delete PAK mod '{pak_info['name']}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        success = remove_pak(self.game_path, pak_info["name"])
+        if success:
+            self.show_status(f"PAK mod '{pak_info['name']}' was deleted successfully.", 4000, "success")
+            self._load_pak_list()
+        else:
+            self.show_status(f"Failed to delete PAK mod '{pak_info['name']}'.", 10000, "error")
 
     def show_settings_location(self):
         """Show the user where settings are stored and provide a summary of features and usage (formatted)."""
