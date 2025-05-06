@@ -17,7 +17,7 @@ from mod_manager.registry import list_esp_files, read_plugins_txt, write_plugins
 from mod_manager.pak_manager import (
     list_managed_paks, add_pak, remove_pak, scan_for_installed_paks, 
     reconcile_pak_list, PAK_EXTENSION, RELATED_EXTENSIONS, create_subfolder,
-    activate_pak, deactivate_pak, get_pak_target_dir
+    activate_pak, deactivate_pak, get_pak_target_dir, get_paks_root_dir, ensure_paks_structure
 )
 import json
 import datetime
@@ -658,6 +658,46 @@ class MainWindow(QWidget):
             mod_name: Name of the mod (for display purposes)
             force_subfolder: If provided, use this as the subfolder for all PAKs
         """
+        # --- ~mods and LogicMods merge logic ---
+        from mod_manager.pak_manager import get_paks_root_dir, ensure_paks_structure
+        ensure_paks_structure(self.game_path)
+        paks_root = get_paks_root_dir(self.game_path)
+        # Merge ~mods from archive if present
+        mods_src = os.path.join(extract_dir, "~mods")
+        if os.path.isdir(mods_src) and paks_root:
+            mods_dest = os.path.join(paks_root, "~mods")
+            os.makedirs(mods_dest, exist_ok=True)
+            for root, dirs, files in os.walk(mods_src):
+                rel_root = os.path.relpath(root, mods_src)
+                dest_root = os.path.join(mods_dest, rel_root) if rel_root != "." else mods_dest
+                os.makedirs(dest_root, exist_ok=True)
+                for file in files:
+                    src_file = os.path.join(root, file)
+                    dest_file = os.path.join(dest_root, file)
+                    try:
+                        shutil.copy2(src_file, dest_file)
+                    except Exception as e:
+                        self.show_status(f"Error copying ~mods file: {file}: {e}", 10000, "error")
+            self.show_status(f"Merged ~mods from archive into {mods_dest}.", 5000, "success")
+        # Merge LogicMods from archive if present
+        logicmods_src = os.path.join(extract_dir, "LogicMods")
+        if os.path.isdir(logicmods_src) and paks_root:
+            logicmods_dest = os.path.join(paks_root, "LogicMods")
+            os.makedirs(logicmods_dest, exist_ok=True)
+            for root, dirs, files in os.walk(logicmods_src):
+                rel_root = os.path.relpath(root, logicmods_src)
+                dest_root = os.path.join(logicmods_dest, rel_root) if rel_root != "." else logicmods_dest
+                os.makedirs(dest_root, exist_ok=True)
+                for file in files:
+                    src_file = os.path.join(root, file)
+                    dest_file = os.path.join(dest_root, file)
+                    try:
+                        shutil.copy2(src_file, dest_file)
+                    except Exception as e:
+                        self.show_status(f"Error copying LogicMods file: {file}: {e}", 10000, "error")
+            self.show_status(f"Merged LogicMods from archive into {logicmods_dest}.", 5000, "success")
+        # --- End ~mods and LogicMods merge logic ---
+        
         # Find ESP and PAK files in the extracted content
         esp_files = []
         pak_files = []
