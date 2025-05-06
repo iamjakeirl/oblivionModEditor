@@ -58,6 +58,7 @@ EXCLUDED_ESPS = [
 ]
 
 from ui.install_type_dialog import InstallTypeDialog
+from mod_manager.ue4ss_installer import ensure_ue4ss_configs
 
 class PluginsListWidget(QListWidget):
     def __init__(self, *args, **kwargs):
@@ -395,6 +396,8 @@ class MainWindow(QWidget):
         self.status_timer.timeout.connect(self.clear_status)
 
         self.load_settings()
+        if ensure_ue4ss_configs(self.game_path):
+            self._refresh_ue4ss_status()
         self.refresh_lists()
         # Load PAK mods list
         self._load_pak_list()

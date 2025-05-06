@@ -225,4 +225,86 @@ def add_ue4ss_mod(game_root: str, src_mod_dir: Path):
         enabled_txt.unlink()
     mods_txt_dir = bin_dir / "UE4SS" / "Mods"
     _update_mods_txt(mods_txt_dir, src_mod_dir.name)
-    return True 
+    return True
+
+def ensure_ue4ss_configs(game_root):
+    """
+    Ensure UE4SS mods.txt and mods.json are patched/configured for OBMM.
+    Returns True if work was done, False if already configured or UE4SS not installed.
+    """
+    if not ue4ss_installed(game_root)[0]:
+        return False
+    bin_dir = get_ue4ss_bin_dir(game_root)
+    if not bin_dir:
+        return False
+    mods_dir = bin_dir / "UE4SS" / "Mods"
+    mods_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = mods_dir / ".obmm_configured"
+    if sentinel.exists():
+        return False
+    mods_txt = mods_dir / "mods.txt"
+    mods_json = mods_dir / "mods.json"
+    _patch_mods_txt(mods_txt)
+    _patch_mods_json(mods_json)
+    sentinel.touch()
+    return True
+
+def _patch_mods_txt(mods_txt_path):
+    """
+    Patch mods.txt to ensure each DEFAULT_DISABLED_MOD has a line "{name} : 0" unless already present, preserving order, appending new lines just above the sentinel.
+    """
+    DEFAULT_DISABLED_MODS = [
+        "CheatManagerEnablerMod",
+        "ConsoleCommandsMod",
+        "ConsoleEnablerMod",
+        "SplitScreenMod",
+        "LineTraceMod"
+    ]
+    sentinel = "; Built-in keybinds, do not move up!"
+    if mods_txt_path.exists():
+        lines = mods_txt_path.read_text(encoding="utf-8").splitlines()
+    else:
+        lines = []
+    # Track which mods are already present (with : 0 or : 1)
+    present_mods = set()
+    for line in lines:
+        for name in DEFAULT_DISABLED_MODS:
+            if line.strip().startswith(f"{name} :"):
+                present_mods.add(name)
+    # Prepare new lines for missing mods
+    new_lines = [f"{name} : 0" for name in DEFAULT_DISABLED_MODS if name not in present_mods]
+    # Find sentinel index, add if missing
+    try:
+        idx = lines.index(sentinel)
+    except ValueError:
+        lines.append(sentinel)
+        idx = len(lines) - 1
+    # Insert new lines just above sentinel
+    lines = lines[:idx] + new_lines + lines[idx:]
+    mods_txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+def _patch_mods_json(mods_json_path):
+    """
+    Patch mods.json to ensure each DEFAULT_DISABLED_MOD has an entry {mod_name: ..., mod_enabled: False} unless already present.
+    """
+    DEFAULT_DISABLED_MODS = [
+        "CheatManagerEnablerMod",
+        "ConsoleCommandsMod",
+        "ConsoleEnablerMod",
+        "SplitScreenMod",
+        "LineTraceMod"
+    ]
+    if mods_json_path.exists():
+        try:
+            data = json.load(open(mods_json_path, "r", encoding="utf-8"))
+        except Exception:
+            data = []
+    else:
+        data = []
+    # Only add missing mods
+    existing_names = {entry.get("mod_name") for entry in data if isinstance(entry, dict)}
+    for name in DEFAULT_DISABLED_MODS:
+        if name not in existing_names:
+            data.append({"mod_name": name, "mod_enabled": False})
+    with open(mods_json_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4) 
