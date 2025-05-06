@@ -3,3 +3,4 @@ py7zr
 rarfile
 pyunpack
 easyprocess 
+requests
