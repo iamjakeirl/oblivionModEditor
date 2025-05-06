@@ -10,9 +10,9 @@ from PyQt5.QtWidgets import (
     QMenu, QAction, QTabWidget, QInputDialog, QProgressDialog, QFrame, QDialog, QSpacerItem, QSizePolicy,
     QTableWidget, QTableWidgetItem
 )
-from PyQt5.QtCore import Qt, QEvent, QItemSelectionModel, QUrl, QMimeData, QTimer
+from PyQt5.QtCore import Qt, QEvent, QItemSelectionModel, QUrl, QMimeData, QTimer, QByteArray
 from PyQt5.QtGui import QDrag, QPixmap, QColor, QFont, QDragEnterEvent, QDropEvent
-from mod_manager.utils import get_game_path, SETTINGS_PATH, get_esp_folder, DATA_DIR, open_folder_in_explorer, guess_install_type, set_install_type
+from mod_manager.utils import get_game_path, SETTINGS_PATH, get_esp_folder, DATA_DIR, open_folder_in_explorer, guess_install_type, set_install_type, load_settings, save_settings
 from mod_manager.registry import list_esp_files, read_plugins_txt, write_plugins_txt
 from mod_manager.pak_manager import (
     list_managed_paks, add_pak, remove_pak, scan_for_installed_paks, 
@@ -34,6 +34,7 @@ from pyunpack import Archive
 # See: https://rarfile.readthedocs.io/en/latest/
 
 EXAMPLE_PATH = r"C:\Games\OblivionRemastered"  # Example for user reference
+REMEMBER_WINDOW_GEOMETRY = True  # hard‑coded toggle - temp
 
 DEFAULT_LOAD_ORDER = [
     "Oblivion.esm",
@@ -396,6 +397,14 @@ class MainWindow(QWidget):
         self.status_timer.timeout.connect(self.clear_status)
 
         self.load_settings()
+        if REMEMBER_WINDOW_GEOMETRY:
+            s = load_settings()
+            geom = s.get("window_geometry")
+            if geom:
+                try:
+                    self.restoreGeometry(QByteArray.fromHex(geom.encode()))
+                except Exception:
+                    pass
         if ensure_ue4ss_configs(self.game_path):
             self._refresh_ue4ss_status()
         self.refresh_lists()
@@ -1668,6 +1677,19 @@ class MainWindow(QWidget):
             self._uninstall_ue4ss()
         else:
             self._install_update_ue4ss()
+
+    def _save_window_geometry(self):  
+        if not REMEMBER_WINDOW_GEOMETRY:  
+            return  
+        s = load_settings()  
+        s["window_geometry"] = self.saveGeometry().toHex().data().decode()  
+        save_settings(s)  
+    def moveEvent(self, e):  
+        super().moveEvent(e)  
+        self._save_window_geometry()  
+    def resizeEvent(self, e):  
+        super().resizeEvent(e)  
+        self._save_window_geometry()
 
 def run():
     app = QApplication(sys.argv)

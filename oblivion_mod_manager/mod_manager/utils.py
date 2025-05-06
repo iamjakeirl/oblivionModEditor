@@ -21,9 +21,22 @@ def get_app_data_dir():
 DATA_DIR = get_app_data_dir() / 'data'
 os.makedirs(DATA_DIR, exist_ok=True)
 
+
+
 SETTINGS_PATH = DATA_DIR / 'settings.json'
 PAK_MODS_FILE = DATA_DIR / 'pak_mods.json'
 
+def load_settings():  # helper – central read
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_settings(data: dict):  # helper – central write
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
 def get_game_path():
     """Read the game path from settings.json. Returns None if not set."""
