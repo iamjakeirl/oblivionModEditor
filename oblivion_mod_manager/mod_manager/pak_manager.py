@@ -2,15 +2,15 @@ import os
 import shutil
 import glob
 from pathlib import Path
-from .utils import get_game_path, load_pak_mods, save_pak_mods
+from .utils import get_game_path, load_pak_mods, save_pak_mods, get_custom_mod_dir_name, delete_display_info
 
 # --- Dynamic PAK Directory Discovery ---
 # Instead of hardcoding the full path, we search for the correct directory structure
 # This allows compatibility with different install types (Steam, Xbox, etc.)
 # The manager will find the active PAK mods directory (~mods) and create/manage the disabled directory as a sibling.
 # This is robust to different install layouts and future-proofs the mod manager.
-TARGET_PAK_SUFFIX = os.path.join("Content", "Paks", "~mods")
-DISABLED_FOLDER_NAME = "disabled"
+TARGET_PAK_SUFFIX = lambda: os.path.join("Content", "Paks", get_custom_mod_dir_name())
+DISABLED_FOLDER_NAME = "DisabledMods"
 # --------------------------------------
 
 def _find_pak_path_suffix(base_path, target_suffix):
@@ -42,38 +42,44 @@ def get_pak_target_dir(game_path):
     if not game_path or not os.path.isdir(game_path):
         print(f"Error: Invalid game path: {game_path}")
         return None
-    target_dir = _find_pak_path_suffix(game_path, TARGET_PAK_SUFFIX)
+    target_dir = _find_pak_path_suffix(game_path, TARGET_PAK_SUFFIX())
     if not target_dir:
-        print(f"Error: Could not find active PAK directory ending in '{TARGET_PAK_SUFFIX}' within {game_path}")
+        print(f"Error: Could not find active PAK directory ending in '{TARGET_PAK_SUFFIX()}' within {game_path}")
         return None
     return target_dir
 
 def get_disabled_pak_dir(game_path):
     """
-    Dynamically create and return the disabled PAK mods directory as a sibling to the active directory.
-    This ensures the disabled folder is always in the correct location, regardless of install type.
-    Returns None if the active directory cannot be found.
+    Return the disabled PAK mods directory as a sibling to the Paks directory.
     """
     if not game_path or not os.path.isdir(game_path):
         print(f"Error: Invalid game path: {game_path}")
         return None
-    active_pak_dir = get_pak_target_dir(game_path)
-    if not active_pak_dir:
-        print(f"Error: Cannot determine disabled PAK directory because active PAK directory ('{TARGET_PAK_SUFFIX}') was not found in {game_path}.")
+    paks_root = get_paks_root_dir(game_path)
+    if not paks_root:
+        print(f"Error: Could not find Paks root directory in {game_path}")
         return None
-    pak_parent_dir = os.path.dirname(active_pak_dir)
-    disabled_dir = os.path.join(pak_parent_dir, DISABLED_FOLDER_NAME)
+    obvdata_root = os.path.dirname(paks_root)
+    disabled_dir = os.path.join(obvdata_root, DISABLED_FOLDER_NAME)
     os.makedirs(disabled_dir, exist_ok=True)
     return disabled_dir
 
+DEFAULT_PAK_FILES = {
+    "OblivionRemastered-WinGDK.pak",
+    "OblivionRemastered-WinGDK.ucas",
+    "OblivionRemastered-WinGDK.utoc",
+    "global.ucas",
+    "global.utoc",
+}
+
+def is_default_pak_file(filename):
+    return os.path.basename(filename) in DEFAULT_PAK_FILES
+
 def list_managed_paks():
     """
-    Get the list of currently managed PAK mods.
-    
-    Returns:
-        list: List of PAK mod entries
+    Get the list of currently managed PAK mods, excluding default game files.
     """
-    return load_pak_mods()
+    return [pak for pak in load_pak_mods() if not is_default_pak_file(pak.get("name", ""))]
 
 def get_related_files(directory, base_name):
     """
@@ -111,7 +117,7 @@ def add_pak(game_path, source_pak_path, target_subfolder=None):
     if not paks_root:
         print(f"Error: Could not find Paks root directory in {game_path}")
         return False
-    mods_dir = os.path.join(paks_root, "~mods")
+    mods_dir = os.path.join(paks_root, get_custom_mod_dir_name())
     # If a subfolder is specified, append it to the ~mods directory
     target_dir = mods_dir
     if target_subfolder:
@@ -197,7 +203,7 @@ def remove_pak(game_path, pak_name):
     paks_root = get_paks_root_dir(game_path)
     if not paks_root:
         return False
-    mods_dir = os.path.join(paks_root, "~mods")
+    mods_dir = os.path.join(paks_root, get_custom_mod_dir_name())
     base_name = os.path.splitext(pak_name)[0]
     pak_mods = load_pak_mods()
     pak_entry = None
@@ -237,6 +243,9 @@ def remove_pak(game_path, pak_name):
         pak_mods.pop(pak_index)
         if save_pak_mods(pak_mods):
             print(f"Success: Removed PAK mod {pak_name} from managed list")
+            # Remove display info entry
+            mod_id = f"{pak_entry.get('subfolder','')}|{pak_entry['name']}"
+            delete_display_info(mod_id)
             return True
         else:
             print(f"Error: Failed to update PAK mods list after removing {pak_name}")
@@ -256,22 +265,18 @@ def deactivate_pak(game_path, pak_info):
     Returns:
         bool: True if successful, False otherwise
     """
-    # Get the source and target directories
     source_dir = get_pak_target_dir(game_path)
     if not source_dir:
         return False
-        
     disabled_dir = get_disabled_pak_dir(game_path)
     if not disabled_dir:
         return False
-    
-    # Get the subfolder path if any
-    if pak_info.get("subfolder"):
-        source_dir = os.path.join(source_dir, pak_info["subfolder"])
-        # Create matching subfolder in disabled directory
-        disabled_subfolder = os.path.join(disabled_dir, pak_info["subfolder"])
-        os.makedirs(disabled_subfolder, exist_ok=True)
-        target_dir = disabled_subfolder
+    # Get the subfolder path if any (always relative to root)
+    subfolder = pak_info.get("subfolder")
+    if subfolder:
+        source_dir = os.path.join(source_dir, subfolder)
+        target_dir = os.path.join(disabled_dir, subfolder)
+        os.makedirs(target_dir, exist_ok=True)
     else:
         target_dir = disabled_dir
     
@@ -351,23 +356,18 @@ def activate_pak(game_path, pak_info):
     Returns:
         bool: True if successful, False otherwise
     """
-    # Get the source and target directories
     disabled_dir = get_disabled_pak_dir(game_path)
     if not disabled_dir:
         return False
-        
     target_dir = get_pak_target_dir(game_path)
     if not target_dir:
         return False
-    
-    # Get the subfolder path if any
-    if pak_info.get("subfolder"):
-        disabled_subfolder = os.path.join(disabled_dir, pak_info["subfolder"])
-        source_dir = disabled_subfolder
-        # Create matching subfolder in active directory
-        target_subfolder = os.path.join(target_dir, pak_info["subfolder"])
-        os.makedirs(target_subfolder, exist_ok=True)
-        target_dir = target_subfolder
+    # Get the subfolder path if any (always relative to root)
+    subfolder = pak_info.get("subfolder")
+    if subfolder:
+        source_dir = os.path.join(disabled_dir, subfolder)
+        target_dir = os.path.join(target_dir, subfolder)
+        os.makedirs(target_dir, exist_ok=True)
     else:
         source_dir = disabled_dir
     
@@ -439,52 +439,54 @@ def activate_pak(game_path, pak_info):
 
 def scan_for_installed_paks(game_path):
     """
-    Scan the Paks root for installed PAK mods (recursively in all subfolders except LogicMods and disabled).
+    Scan the Paks root for installed PAK mods (recursively in all subfolders except LogicMods and disabled), excluding default game files.
     """
     ensure_paks_structure(game_path)
     paks_root = get_paks_root_dir(game_path)
     if not paks_root or not os.path.isdir(paks_root):
         return []
     found_paks = []
-    # Walk all subfolders in Paks root except LogicMods and disabled
-    for root, dirs, files in os.walk(paks_root):
-        # Skip LogicMods and disabled
-        rel = os.path.relpath(root, paks_root)
-        parts = rel.split(os.sep)
-        if "LogicMods" in parts or DISABLED_FOLDER_NAME in parts:
-            continue
-        pak_files = [f for f in files if f.lower().endswith(PAK_EXTENSION)]
-        subfolder = None
-        if root != paks_root:
-            rel_path = os.path.relpath(root, paks_root)
-            subfolder = rel_path
-        for pak_file in pak_files:
-            base_name = os.path.splitext(pak_file)[0]
-            related_files = get_related_files(root, base_name)
-            pak_path = os.path.join(root, pak_file)
-            if pak_path not in related_files:
-                related_files.append(pak_path)
-            extensions = sorted(set(os.path.splitext(f)[1].lower() for f in related_files))
-            found_paks.append({
-                "name": pak_file,
-                "base_name": base_name,
-                "files": related_files,
-                "extensions": extensions,
-                "subfolder": subfolder,
-                "active": True
-            })
-    # Scan disabled mods as before
-    disabled_dir = get_disabled_pak_dir(game_path)
-    if disabled_dir and os.path.isdir(disabled_dir):
-        for root, dirs, files in os.walk(disabled_dir):
-            pak_files = [f for f in files if f.lower().endswith(PAK_EXTENSION)]
-            subfolder = None
-            if root != disabled_dir:
-                rel_path = os.path.relpath(root, disabled_dir)
-                subfolder = rel_path
+    # Walk all subfolders in custom mods dir except LogicMods and disabled
+    mods_dir = os.path.join(paks_root, get_custom_mod_dir_name())
+    if os.path.isdir(mods_dir):
+        for root, dirs, files in os.walk(mods_dir):
+            # Skip LogicMods and disabled
+            rel = os.path.relpath(root, mods_dir)
+            parts = rel.split(os.sep)
+            if "LogicMods" in parts or DISABLED_FOLDER_NAME in parts:
+                continue
+            pak_files = [f for f in files if f.lower().endswith(PAK_EXTENSION) and not is_default_pak_file(f)]
+            subfolder = None if rel == "." else rel
             for pak_file in pak_files:
                 base_name = os.path.splitext(pak_file)[0]
                 related_files = get_related_files(root, base_name)
+                # Exclude if any related file is a default file
+                if any(is_default_pak_file(f) for f in related_files):
+                    continue
+                pak_path = os.path.join(root, pak_file)
+                if pak_path not in related_files:
+                    related_files.append(pak_path)
+                extensions = sorted(set(os.path.splitext(f)[1].lower() for f in related_files))
+                found_paks.append({
+                    "name": pak_file,
+                    "base_name": base_name,
+                    "files": related_files,
+                    "extensions": extensions,
+                    "subfolder": subfolder,
+                    "active": True
+                })
+    # Scan disabled mods as before, but use relative to disabled_dir
+    disabled_dir = get_disabled_pak_dir(game_path)
+    if disabled_dir and os.path.isdir(disabled_dir):
+        for root, dirs, files in os.walk(disabled_dir):
+            rel = os.path.relpath(root, disabled_dir)
+            pak_files = [f for f in files if f.lower().endswith(PAK_EXTENSION) and not is_default_pak_file(f)]
+            subfolder = None if rel == "." else rel
+            for pak_file in pak_files:
+                base_name = os.path.splitext(pak_file)[0]
+                related_files = get_related_files(root, base_name)
+                if any(is_default_pak_file(f) for f in related_files):
+                    continue
                 pak_path = os.path.join(root, pak_file)
                 if pak_path not in related_files:
                     related_files.append(pak_path)
@@ -516,6 +518,12 @@ def reconcile_pak_list(game_path):
     
     # Load the current PAK mods list
     managed_paks = load_pak_mods()
+    
+    # One-time fix for already-stored "tMods" duplicates
+    custom = get_custom_mod_dir_name()
+    for pak in managed_paks:
+        if pak.get("subfolder") == custom:
+            pak["subfolder"] = None
     
     # Create identifier tuples for comparison (name + subfolder + active status)
     installed_ids = {(pak["name"], pak.get("subfolder"), pak.get("active", True)) for pak in installed_paks}
@@ -612,8 +620,11 @@ def ensure_paks_structure(game_path):
     paks_root = get_paks_root_dir(game_path)
     if not paks_root:
         return None
-    mods_dir = os.path.join(paks_root, "~mods")
+    mods_dir = os.path.join(paks_root, get_custom_mod_dir_name())
     logicmods_dir = os.path.join(paks_root, "LogicMods")
+    obvdata_root = os.path.dirname(paks_root)
+    disabled_dir = os.path.join(obvdata_root, DISABLED_FOLDER_NAME)
     os.makedirs(mods_dir, exist_ok=True)
     os.makedirs(logicmods_dir, exist_ok=True)
+    os.makedirs(disabled_dir, exist_ok=True)
     return paks_root 

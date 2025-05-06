@@ -8,11 +8,11 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QListWidget, QListWidgetItem, QFileDialog, QMessageBox, QAbstractItemView, QCheckBox,
     QMenu, QAction, QTabWidget, QInputDialog, QProgressDialog, QFrame, QDialog, QSpacerItem, QSizePolicy,
-    QTableWidget, QTableWidgetItem
+    QTableWidget, QTableWidgetItem, QTableView
 )
-from PyQt5.QtCore import Qt, QEvent, QItemSelectionModel, QUrl, QMimeData, QTimer, QByteArray
+from PyQt5.QtCore import Qt, QEvent, QItemSelectionModel, QUrl, QMimeData, QTimer, QByteArray, QSortFilterProxyModel
 from PyQt5.QtGui import QDrag, QPixmap, QColor, QFont, QDragEnterEvent, QDropEvent
-from mod_manager.utils import get_game_path, SETTINGS_PATH, get_esp_folder, DATA_DIR, open_folder_in_explorer, guess_install_type, set_install_type, load_settings, save_settings
+from mod_manager.utils import get_game_path, SETTINGS_PATH, get_esp_folder, DATA_DIR, open_folder_in_explorer, guess_install_type, set_install_type, load_settings, save_settings, get_custom_mod_dir_name
 from mod_manager.registry import list_esp_files, read_plugins_txt, write_plugins_txt
 from mod_manager.pak_manager import (
     list_managed_paks, add_pak, remove_pak, scan_for_installed_paks, 
@@ -60,6 +60,7 @@ EXCLUDED_ESPS = [
 
 from ui.install_type_dialog import InstallTypeDialog
 from mod_manager.ue4ss_installer import ensure_ue4ss_configs
+from ui.jorkTableQT import ModTableModel
 
 class PluginsListWidget(QListWidget):
     def __init__(self, *args, **kwargs):
@@ -270,35 +271,34 @@ class MainWindow(QWidget):
         self.pak_frame = QWidget()
         self.pak_layout = QVBoxLayout()
         self.pak_frame.setLayout(self.pak_layout)
-        
-        # Inactive PAK mods list
+
+        # Add toggles header for PAK table
+        self.chk_real = QCheckBox("Show real names")
+        hdr = QHBoxLayout()
+        hdr.addWidget(self.chk_real)
+        self.pak_layout.insertLayout(0, hdr)
+
+        # Add search box above the tables
+        self.pak_search = QLineEdit()
+        self.pak_search.setPlaceholderText("Search mods...")
+        self.pak_layout.insertWidget(1, self.pak_search)
+
+        # Disabled PAKs label and table
         self.inactive_pak_label = QLabel("Disabled PAKs (double-click to activate):")
         self.inactive_pak_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.inactive_pak_label.setAlignment(Qt.AlignCenter)
-        self.pak_layout.addWidget(self.inactive_pak_label)
-        
-        self.inactive_pak_listbox = QListWidget()
-        self.inactive_pak_listbox.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.inactive_pak_listbox.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.inactive_pak_listbox.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.inactive_pak_listbox.customContextMenuRequested.connect(self._show_pak_context_menu)
-        self.inactive_pak_listbox.itemDoubleClicked.connect(self._activate_pak_double_clicked)
-        self.pak_layout.addWidget(self.inactive_pak_listbox)
-        
-        # Active PAK mods list
+        self.pak_layout.insertWidget(2, self.inactive_pak_label)
+        self.inactive_pak_table = QTableView()
+        self.pak_layout.insertWidget(3, self.inactive_pak_table)
+
+        # Enabled PAKs label and table
         self.active_pak_label = QLabel("Enabled PAKs (double-click to deactivate):")
         self.active_pak_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.active_pak_label.setAlignment(Qt.AlignCenter)
-        self.pak_layout.addWidget(self.active_pak_label)
-        
-        self.active_pak_listbox = QListWidget()
-        self.active_pak_listbox.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.active_pak_listbox.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.active_pak_listbox.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.active_pak_listbox.customContextMenuRequested.connect(self._show_pak_context_menu)
-        self.active_pak_listbox.itemDoubleClicked.connect(self._deactivate_pak_double_clicked)
-        self.pak_layout.addWidget(self.active_pak_listbox)
-        
+        self.pak_layout.insertWidget(4, self.active_pak_label)
+        self.active_pak_table = QTableView()
+        self.pak_layout.insertWidget(5, self.active_pak_table)
+
         # PAK control buttons
         self.pak_button_row = QHBoxLayout()
         self.refresh_pak_btn = QPushButton("Refresh PAK List")
@@ -506,6 +506,127 @@ class MainWindow(QWidget):
         # Connect tab change handler
         self.notebook.currentChanged.connect(self._on_tab_changed)
 
+        # --- SETTINGS TAB --------------------------------------------------
+        self.settings_frame = QWidget()
+        settings_container = QFrame(self.settings_frame)
+        settings_container.setMaximumWidth(460)
+        settings_container.setMinimumWidth(360)
+        settings_container.setStyleSheet("""
+            QFrame {
+                background-color: #1e1e1e;
+                border: 1px solid #444;
+                border-radius: 12px;
+                padding: 20px;
+                margin: 24px 0 0 24px;
+            }
+        """)
+        settings_layout = QVBoxLayout(settings_container)
+        settings_layout.setAlignment(Qt.AlignTop | Qt.AlignCenter)
+        settings_layout.setContentsMargins(20, 16, 20, 20)
+        settings_layout.setSpacing(12)
+
+        # Header
+        header = QLabel("Pak Install Dir")
+        header.setAlignment(Qt.AlignCenter)
+        header.setStyleSheet("font-size: 16pt; color: #ff9800; font-weight: bold; margin-bottom: 12px; padding: 0;")
+        settings_layout.addWidget(header)
+
+        # Description
+        desc = QLabel("Set the name of the folder inside Paks where mods are installed.\nDefault is '~mods'.")
+        desc.setWordWrap(True)
+        desc.setAlignment(Qt.AlignCenter)
+        desc.setStyleSheet("font-size: 11pt; color: #aaaaaa; margin-bottom: 16px;")
+        settings_layout.addWidget(desc)
+
+        # Input container with light background
+        input_container = QFrame()
+        input_container.setStyleSheet("""
+            QFrame {
+                background-color: #252525;
+                border-radius: 8px;
+                padding: 12px;
+            }
+            QLineEdit {
+                background-color: #303030;
+                border: 1px solid #555;
+                border-radius: 4px;
+                padding: 8px;
+                color: #ffffff;
+                font-size: 11pt;
+            }
+            QPushButton {
+                background-color: #3a3a3a;
+                color: #ff9800;
+                border: 1px solid #555;
+                border-radius: 4px;
+                padding: 8px 16px;
+                min-height: 32px;
+            }
+            QPushButton:hover {
+                background-color: #404040;
+                border: 1px solid #ff9800;
+            }
+            QPushButton:pressed {
+                background-color: #303030;
+            }
+        """)
+        input_layout = QHBoxLayout(input_container)
+        input_layout.setContentsMargins(8, 8, 8, 8)
+        input_layout.setSpacing(12)
+
+        self.mod_dir_edit = QLineEdit(get_custom_mod_dir_name())
+        self.mod_dir_edit.setMinimumHeight(32)
+        self.mod_dir_browse_btn = QPushButton("Browse")
+        self.mod_dir_browse_btn.setFixedWidth(100)
+        self.mod_dir_browse_btn.setCursor(Qt.PointingHandCursor)
+        self.mod_dir_browse_btn.clicked.connect(self._browse_mod_dir_name)
+
+        input_layout.addWidget(self.mod_dir_edit, 1)
+        input_layout.addWidget(self.mod_dir_browse_btn, 0)
+        settings_layout.addWidget(input_container)
+
+        # Button row with save button
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 16, 0, 0)
+        button_row.setSpacing(12)
+        button_row.setAlignment(Qt.AlignCenter)
+
+        apply_btn = QPushButton("Save Changes")
+        apply_btn.setFixedWidth(150)
+        apply_btn.setMinimumHeight(40)
+        apply_btn.setCursor(Qt.PointingHandCursor)
+        apply_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ff9800;
+                color: #000000;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+                font-size: 11pt;
+            }
+            QPushButton:hover {
+                background-color: #ffb74d;
+            }
+            QPushButton:pressed {
+                background-color: #f57c00;
+            }
+        """)
+        apply_btn.clicked.connect(self._save_custom_mod_dir)
+        button_row.addWidget(apply_btn)
+
+        settings_layout.addLayout(button_row)
+
+        # Add the settings container to the frame's layout
+        outer_layout = QVBoxLayout(self.settings_frame)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        outer_layout.addWidget(settings_container, alignment=Qt.AlignTop | Qt.AlignLeft)
+        outer_layout.addStretch(1)
+
+        self.notebook.addTab(self.settings_frame, "Settings")
+        # -------------------------------------------------------------------
+
     # Add drag and drop event handlers
     def dragEnterEvent(self, event: QDragEnterEvent):
         """Accept drag if any URL is a file or directory (not just archives)."""
@@ -652,7 +773,6 @@ class MainWindow(QWidget):
     def _install_extracted_mod(self, extract_dir, mod_name, force_subfolder=None):
         """
         Install extracted mod files to the appropriate locations.
-        
         Args:
             extract_dir: Directory containing extracted mod files
             mod_name: Name of the mod (for display purposes)
@@ -663,22 +783,11 @@ class MainWindow(QWidget):
         ensure_paks_structure(self.game_path)
         paks_root = get_paks_root_dir(self.game_path)
         # Merge ~mods from archive if present
+        custom_dir = os.path.join(paks_root, get_custom_mod_dir_name())
         mods_src = os.path.join(extract_dir, "~mods")
         if os.path.isdir(mods_src) and paks_root:
-            mods_dest = os.path.join(paks_root, "~mods")
-            os.makedirs(mods_dest, exist_ok=True)
-            for root, dirs, files in os.walk(mods_src):
-                rel_root = os.path.relpath(root, mods_src)
-                dest_root = os.path.join(mods_dest, rel_root) if rel_root != "." else mods_dest
-                os.makedirs(dest_root, exist_ok=True)
-                for file in files:
-                    src_file = os.path.join(root, file)
-                    dest_file = os.path.join(dest_root, file)
-                    try:
-                        shutil.copy2(src_file, dest_file)
-                    except Exception as e:
-                        self.show_status(f"Error copying ~mods file: {file}: {e}", 10000, "error")
-            self.show_status(f"Merged ~mods from archive into {mods_dest}.", 5000, "success")
+            _merge_tree(mods_src, custom_dir)
+            self.show_status(f"Merged ~mods from archive into {custom_dir}.", 5000, "success")
         # Merge LogicMods from archive if present
         logicmods_src = os.path.join(extract_dir, "LogicMods")
         if os.path.isdir(logicmods_src) and paks_root:
@@ -698,12 +807,15 @@ class MainWindow(QWidget):
             self.show_status(f"Merged LogicMods from archive into {logicmods_dest}.", 5000, "success")
         # --- End ~mods and LogicMods merge logic ---
         
-        # Find ESP and PAK files in the extracted content
+        # Find ESP and PAK files in the extracted content, skipping ~mods and LogicMods
         esp_files = []
         pak_files = []
-        
-        # Walk through all files in the extracted directory
+        skip_dirs = {os.path.abspath(os.path.join(extract_dir, "~mods")), os.path.abspath(os.path.join(extract_dir, "LogicMods"))}
         for root, _, files in os.walk(extract_dir):
+            abs_root = os.path.abspath(root)
+            # Skip any files inside ~mods or LogicMods in the extracted archive
+            if any(abs_root == d or abs_root.startswith(d + os.sep) for d in skip_dirs):
+                continue
             for filename in files:
                 filepath = os.path.join(root, filename)
                 
@@ -1075,188 +1187,182 @@ class MainWindow(QWidget):
         self.refresh_lists()
 
     def _load_pak_list(self):
-        """Load the list of managed PAK mods into the listboxes."""
-        self.active_pak_listbox.clear()
-        self.inactive_pak_listbox.clear()
-        
-        # Check if game path is set
+        """Load the list of managed PAK mods into the enabled/disabled tables."""
         if not self.game_path:
             return
-            
-        # Reconcile managed PAKs with installed PAKs
         reconcile_pak_list(self.game_path)
-        
-        # Get the list of managed PAKs
         pak_mods = list_managed_paks()
-        
-        # Add each PAK to the appropriate listbox based on active status
-        for pak_info in pak_mods:
-            pak_name = pak_info.get("name", "Unknown PAK")
-            
-            # Create display name with subfolder if applicable
-            display_name = pak_name
-            if pak_info.get("subfolder"):
-                display_name = f"{pak_info['subfolder']} / {pak_name}"
-                
-            # Create an item with the PAK name
-            item = QListWidgetItem(display_name)
-            
-            # Store the original pak_info data in the item for later use
-            item.setData(Qt.UserRole, pak_info)
-            
-            # Add file extensions as tooltip if available
-            tooltip = ""
-            if pak_info.get("subfolder"):
-                tooltip += f"Subfolder: {pak_info['subfolder']}\n"
-                
-            tooltip += f"Status: {'Active' if pak_info.get('active', True) else 'Inactive'}\n"
-                
-            if "extensions" in pak_info and pak_info["extensions"]:
-                extensions_str = ", ".join(pak_info["extensions"])
-                tooltip += f"File types: {extensions_str}"
-                
-                # Add file list if available
-                if "files" in pak_info and pak_info["files"]:
-                    file_list = "\n".join(os.path.basename(f) for f in pak_info["files"])
-                    tooltip += f"\n\nFiles:\n{file_list}"
-                
-            if tooltip:
-                item.setToolTip(tooltip)
-                
-            # Add to the appropriate listbox based on active status
-            if pak_info.get("active", True):
-                self.active_pak_listbox.addItem(item)
-            else:
-                self.inactive_pak_listbox.addItem(item)
-
-    def _activate_pak_double_clicked(self, item):
-        """Handle double-click on inactive PAK to activate it."""
-        pak_info = item.data(Qt.UserRole)
-        if pak_info:
-            success = activate_pak(self.game_path, pak_info)
-            if not success:
-                self.show_status(f"Error: Failed to activate PAK mod: {pak_info['name']}", 5000, "error")
-            else:
-                self.show_status(f"Activated PAK mod: {pak_info['name']}", 3000, "success")
-            self._load_pak_list()
-
-    def _deactivate_pak_double_clicked(self, item):
-        """Handle double-click on active PAK to deactivate it."""
-        pak_info = item.data(Qt.UserRole)
-        if pak_info:
-            success = deactivate_pak(self.game_path, pak_info)
-            if not success:
-                self.show_status(f"Error: Failed to deactivate PAK mod: {pak_info['name']}", 5000, "error")
-            else:
-                self.show_status(f"Deactivated PAK mod: {pak_info['name']}", 3000, "success")
-            self._load_pak_list()
-
-    def _show_pak_context_menu(self, position):
-        """Show context menu for PAK mods."""
-        # Determine which list widget triggered the context menu
-        sender = self.sender()
-        
-        # Get selected items
-        if sender == self.inactive_pak_listbox:
-            selected_items = self.inactive_pak_listbox.selectedItems()
-            is_active = False
-        else:  # sender == self.active_pak_listbox
-            selected_items = self.active_pak_listbox.selectedItems()
-            is_active = True
-            
-        if not selected_items:
-            return
-            
-        # Create context menu
-        context_menu = QMenu(self)
-        
-        # Get PAK info for the currently selected item
-        current_item = sender.itemAt(position)
-        if not current_item:
-            current_item = selected_items[0]
-            
-        pak_info = current_item.data(Qt.UserRole)
-        if not pak_info:
-            return
-            
-        # Add actions based on PAK status
-        if is_active:
-            deactivate_action = QAction("Deactivate PAK", self)
-            deactivate_action.triggered.connect(lambda: self._context_deactivate_pak(pak_info))
-            context_menu.addAction(deactivate_action)
-        else:
-            activate_action = QAction("Activate PAK", self)
-            activate_action.triggered.connect(lambda: self._context_activate_pak(pak_info))
-            context_menu.addAction(activate_action)
-            
-        # Always add remove action
-        remove_action = QAction("Remove PAK", self)
-        remove_action.triggered.connect(lambda: self._context_remove_pak(pak_info))
-        context_menu.addAction(remove_action)
-        
-        # Show context menu
-        context_menu.exec_(sender.mapToGlobal(position))
-    
-    def _context_activate_pak(self, pak_info):
-        """Activate a PAK mod from context menu."""
-        if not self.game_path:
-            self.show_status("Error: Game path not set.", 5000, "error")
-            return
-        # Store info for reselection
-        to_reselect = [{
-            "name": pak_info["name"],
-            "subfolder": pak_info.get("subfolder"),
-            "active": True  # Will be active after operation
-        }]
-        success = activate_pak(self.game_path, pak_info)
-        if success:
-            self.show_status(f"Activated PAK mod: {pak_info['name']}", 3000, "success")
-            self._load_pak_list()
-        else:
-            self.show_status(f"Error: Failed to activate PAK mod: {pak_info['name']}", 5000, "error")
-    
-    def _context_deactivate_pak(self, pak_info):
-        """Deactivate a PAK mod from context menu."""
-        if not self.game_path:
-            self.show_status("Error: Game path not set.", 5000, "error")
-            return
-        # Store info for reselection
-        to_reselect = [{
-            "name": pak_info["name"],
-            "subfolder": pak_info.get("subfolder"),
-            "active": False  # Will be inactive after operation
-        }]
-        success = deactivate_pak(self.game_path, pak_info)
-        if success:
-            self.show_status(f"Deactivated PAK mod: {pak_info['name']}", 3000, "success")
-            self._load_pak_list()
-        else:
-            self.show_status(f"Error: Failed to deactivate PAK mod: {pak_info['name']}", 5000, "error")
-    
-    def _context_remove_pak(self, pak_info):
-        """Remove a PAK mod from context menu."""
-        if not self.game_path:
-            QMessageBox.warning(self, "Error", "Game path not set.")
-            return
-            
-        # Confirm removal
-        reply = QMessageBox.question(
-            self,
-            "Confirm Removal",
-            f"Are you sure you want to remove PAK mod {pak_info['name']}?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+        # Build rows for both tables
+        all_rows = []
+        for pak in pak_mods:
+            all_rows.append({
+                "id": f"{pak.get('subfolder','')}|{pak['name']}",
+                "real": pak["name"],
+                "subfolder": pak.get("subfolder"),
+                "active": pak.get("active", True),
+                "pak_info": pak
+            })
+        enabled_rows = [row for row in all_rows if row["active"]]
+        disabled_rows = [row for row in all_rows if not row["active"]]
+        # Define the color scheme for tables
+        table_colors = {
+            'background': QColor('#181818'),
+            'foreground': QColor('#e0e0e0'),
+            'selection_background': QColor('#333333'),
+            'selection_foreground': QColor('#ff9800'),
+        }
+        # Define reusable table stylesheet
+        table_stylesheet = """
+QHeaderView::section {
+    background-color: #232323;
+    color: #ff9800;
+    font-weight: bold;
+    border: 1px solid #444;
+}
+QTableView {
+    selection-background-color: #333333;
+    selection-color: #ff9800;
+}
+"""
+        # Models and proxies
+        self.active_pak_model = ModTableModel(
+            enabled_rows,
+            get_show_real=lambda: self.chk_real.isChecked(),
+            parent=self.active_pak_table,
+            colors=table_colors
         )
-        
-        if reply != QMessageBox.Yes:
+        self.inactive_pak_model = ModTableModel(
+            disabled_rows,
+            get_show_real=lambda: self.chk_real.isChecked(),
+            parent=self.inactive_pak_table,
+            colors=table_colors
+        )
+        self.active_pak_proxy = QSortFilterProxyModel(self)
+        self.active_pak_proxy.setSourceModel(self.active_pak_model)
+        self.active_pak_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        self.active_pak_proxy.setFilterKeyColumn(-1)
+        self.inactive_pak_proxy = QSortFilterProxyModel(self)
+        self.inactive_pak_proxy.setSourceModel(self.inactive_pak_model)
+        self.inactive_pak_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        self.inactive_pak_proxy.setFilterKeyColumn(-1)
+        self.active_pak_table.setModel(self.active_pak_proxy)
+        self.inactive_pak_table.setModel(self.inactive_pak_proxy)
+        self.active_pak_table.setSortingEnabled(True)
+        self.inactive_pak_table.setSortingEnabled(True)
+        self.active_pak_table.setStyleSheet(table_stylesheet)
+        self.inactive_pak_table.setStyleSheet(table_stylesheet)
+        # Set default column width for first column (Display Name)
+        self.active_pak_table.horizontalHeader().setSectionResizeMode(0, self.active_pak_table.horizontalHeader().Interactive)
+        self.active_pak_table.setColumnWidth(0, 350)
+        self.inactive_pak_table.horizontalHeader().setSectionResizeMode(0, self.inactive_pak_table.horizontalHeader().Interactive)
+        self.inactive_pak_table.setColumnWidth(0, 350)
+        # Connect toggles to both models
+        self.chk_real.toggled.connect(self.active_pak_model.layoutChanged.emit)
+        self.chk_real.toggled.connect(self.inactive_pak_model.layoutChanged.emit)
+        # Search box filters both tables
+        self.pak_search.textChanged.connect(self.active_pak_proxy.setFilterFixedString)
+        self.pak_search.textChanged.connect(self.inactive_pak_proxy.setFilterFixedString)
+        # Double-click to activate/deactivate
+        # Disconnect previous connections to avoid multiple triggers and stale proxies
+        try:
+            self.active_pak_table.doubleClicked.disconnect()
+            print("[DEBUG] Cleared previous doubleClicked connection for active_pak_table.")
+        except Exception:
+            print("[DEBUG] No previous doubleClicked connection for active_pak_table to clear.")
+        try:
+            self.inactive_pak_table.doubleClicked.disconnect()
+            print("[DEBUG] Cleared previous doubleClicked connection for inactive_pak_table.")
+        except Exception:
+            print("[DEBUG] No previous doubleClicked connection for inactive_pak_table to clear.")
+        self.active_pak_table.doubleClicked.connect(self._deactivate_pak_table_row)
+        print("[DEBUG] Connected doubleClicked for active_pak_table.")
+        self.inactive_pak_table.doubleClicked.connect(self._activate_pak_table_row)
+        print("[DEBUG] Connected doubleClicked for inactive_pak_table.")
+        # Context menus
+        self.active_pak_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.active_pak_table.customContextMenuRequested.connect(lambda pos: self._show_pak_table_context_menu(pos, enabled=True))
+        self.inactive_pak_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.inactive_pak_table.customContextMenuRequested.connect(lambda pos: self._show_pak_table_context_menu(pos, enabled=False))
+
+    def _activate_pak_table_row(self, index):
+        # Activate a PAK from the disabled table
+        if not index.isValid():
             return
-            
-        success = remove_pak(self.game_path, pak_info["name"])
-        if success:
-            self._load_pak_list()
-            # No reselection needed for removal since the item is gone
+        src_index = self.inactive_pak_proxy.mapToSource(index)
+        row = src_index.row()
+        if row >= len(self.inactive_pak_model._rows):
+            return
+        pak_info = self.inactive_pak_model._rows[row]["pak_info"]
+        success = activate_pak(self.game_path, pak_info)
+        if not success:
+            self.show_status(f"Error: Failed to activate PAK mod: {pak_info['name']}", 5000, "error")
         else:
-            QMessageBox.warning(self, "Error", f"Failed to remove PAK mod: {pak_info['name']}")
+            self.show_status(f"Activated PAK mod: {pak_info['name']}", 3000, "success")
+        self._load_pak_list()
+
+    def _deactivate_pak_table_row(self, index):
+        # Deactivate a PAK from the enabled table
+        if not index.isValid():
+            return
+        src_index = self.active_pak_proxy.mapToSource(index)
+        row = src_index.row()
+        if row >= len(self.active_pak_model._rows):
+            return
+        pak_info = self.active_pak_model._rows[row]["pak_info"]
+        success = deactivate_pak(self.game_path, pak_info)
+        if not success:
+            self.show_status(f"Error: Failed to deactivate PAK mod: {pak_info['name']}", 5000, "error")
+        else:
+            self.show_status(f"Deactivated PAK mod: {pak_info['name']}", 3000, "success")
+        self._load_pak_list()
+
+    def _show_pak_table_context_menu(self, pos, enabled):
+        from mod_manager.utils import get_display_info, set_display_info  # Ensure available for both actions
+        table = self.active_pak_table if enabled else self.inactive_pak_table
+        proxy = self.active_pak_proxy if enabled else self.inactive_pak_proxy
+        model = self.active_pak_model if enabled else self.inactive_pak_model
+        index = table.indexAt(pos)
+        if not index.isValid():
+            return
+        src_index = proxy.mapToSource(index)
+        row = src_index.row()
+        mod_id = model._rows[row]["id"]
+        from PyQt5.QtWidgets import QMenu, QInputDialog, QMessageBox
+        menu = QMenu(self)
+        rename_action = menu.addAction("Rename Display Name…")
+        group_action = menu.addAction("Set Group…")
+        action = menu.exec_(table.viewport().mapToGlobal(pos))
+        if action == rename_action:
+            current = model._rows[row]["real"]
+            text, ok = QInputDialog.getText(self, "Rename Display Name", "Display Name:", text=current)
+            if ok:
+                new_name = text.strip()
+                if not new_name:
+                    QMessageBox.warning(self, "Invalid Name", "Display name cannot be blank.")
+                    return
+                all_display_names = set()
+                for i, r in enumerate(model._rows):
+                    if i == row:
+                        continue
+                    mod_id_i = r["id"]
+                    disp_i = get_display_info(mod_id_i)
+                    name_i = disp_i.get("display", r["real"])
+                    all_display_names.add(name_i.strip().lower())
+                if new_name.lower() in all_display_names:
+                    QMessageBox.warning(self, "Duplicate Name", "That display name is already used by another mod.")
+                    return
+                set_display_info(mod_id, display=new_name)
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(0, self._load_pak_list)
+                return  # Prevent use of stale model/proxy
+        elif action == group_action:
+            current = get_display_info(mod_id).get("group", "")
+            text, ok = QInputDialog.getText(self, "Set Group", "Group:", text=current)
+            if ok:
+                set_display_info(mod_id, group=text.strip())
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(0, self._load_pak_list)
+                return  # Prevent use of stale model/proxy
 
     def show_settings_location(self):
         """Show the user where settings are stored and provide a summary of features and usage (formatted)."""
@@ -1730,6 +1836,132 @@ class MainWindow(QWidget):
     def resizeEvent(self, e):  
         super().resizeEvent(e)  
         self._save_window_geometry()
+
+    def _save_custom_mod_dir(self):
+        name = self.mod_dir_edit.text().strip()
+        try:
+            from mod_manager.utils import set_custom_mod_dir_name
+            old = get_custom_mod_dir_name()
+            set_custom_mod_dir_name(name)
+            # Prompt for migration if old dir exists and is different
+            from mod_manager.pak_manager import get_paks_root_dir
+            old_dir = os.path.join(get_paks_root_dir(self.game_path), old)
+            new_dir = os.path.join(get_paks_root_dir(self.game_path), name)
+            if os.path.isdir(old_dir) and old != name:
+                dlg = MigrateModsDialog(old_dir, new_dir, self)
+                if dlg.exec_() == QDialog.Accepted:
+                    moved = migrate_mods(old_dir, new_dir, self)
+                    self.show_status(f"Moved {moved} files from '{old}' to '{name}'.", 6000, "success")
+            ensure_paks_structure(self.game_path)         # recreate folder if missing
+            self.show_status(
+                f"Custom mod folder set to '{name}'. (Existing files stay in '{old}').",
+                6000, "success")
+            self._load_pak_list()
+        except ValueError:
+            self.show_status("Folder name invalid or reserved.", 5000, "error")
+
+    def _browse_mod_dir_name(self):
+        # Let user pick a folder, but only use the folder name
+        from mod_manager.pak_manager import get_paks_root_dir
+        base_dir = None
+        if self.game_path:
+            paks_root = get_paks_root_dir(self.game_path)
+            if paks_root:
+                current_mod_dir = self.mod_dir_edit.text().strip() or get_custom_mod_dir_name()
+                candidate = os.path.join(paks_root, current_mod_dir)
+                if os.path.isdir(candidate):
+                    base_dir = candidate
+                else:
+                    base_dir = paks_root
+        folder = QFileDialog.getExistingDirectory(self, "Select Mod Subfolder (just pick a folder to use its name)", base_dir or "")
+        if folder:
+            # Only use the last part of the path as the folder name
+            folder_name = os.path.basename(os.path.normpath(folder))
+            if folder_name:
+                self.mod_dir_edit.setText(folder_name)
+
+class MigrateModsDialog(QDialog):
+    def __init__(self, old_dir, new_dir, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Migrate Mods")
+        self.setWindowModality(Qt.WindowModal)
+        self.setMinimumWidth(400)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #232323;
+                color: #e0e0e0;
+                font-family: 'Segoe UI', Arial, sans-serif;
+                font-size: 11pt;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+            QPushButton {
+                background-color: #292929;
+                color: #ff9800;
+                border: 1px solid #444;
+                border-radius: 4px;
+                padding: 6px 16px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #333;
+                color: #fff;
+                border: 1px solid #ff9800;
+            }
+            QPushButton:pressed {
+                background-color: #181818;
+                color: #ff9800;
+            }
+        """)
+        layout = QVBoxLayout(self)
+        msg = QLabel(f"Move all mods from <b>{old_dir}</b> to <b>{new_dir}</b>?\nThis will preserve all subfolders and files.")
+        msg.setWordWrap(True)
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(msg)
+        btn_row = QHBoxLayout()
+        self.ok_btn = QPushButton("Migrate")
+        self.ok_btn.clicked.connect(self.accept)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(self.ok_btn)
+        btn_row.addWidget(self.cancel_btn)
+        layout.addLayout(btn_row)
+
+
+def migrate_mods(old_dir, new_dir, parent=None):
+    import shutil, os
+    from PyQt5.QtWidgets import QProgressDialog
+    if not os.path.isdir(old_dir):
+        return 0
+    # Count files to move
+    file_list = []
+    for root, _, files in os.walk(old_dir):
+        for f in files:
+            src = os.path.join(root, f)
+            rel = os.path.relpath(src, old_dir)
+            dst = os.path.join(new_dir, rel)
+            file_list.append((src, dst))
+    if not file_list:
+        return 0
+    dlg = QProgressDialog("Migrating mods...", "Cancel", 0, len(file_list), parent)
+    dlg.setWindowModality(Qt.WindowModal)
+    dlg.setMinimumWidth(400)
+    dlg.show()
+    moved = 0
+    for i, (src, dst) in enumerate(file_list):
+        if dlg.wasCanceled():
+            break
+        dlg.setValue(i)
+        dlg.setLabelText(f"Moving: {os.path.basename(src)}")
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        try:
+            shutil.move(src, dst)
+            moved += 1
+        except Exception:
+            pass
+    dlg.setValue(len(file_list))
+    return moved
 
 def run():
     app = QApplication(sys.argv)

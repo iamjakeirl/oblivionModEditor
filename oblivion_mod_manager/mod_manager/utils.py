@@ -144,4 +144,90 @@ def guess_install_type(game_root: str) -> str:
         return "steam"
     if r"\xboxgames" in p:
         return "gamepass"
-    return "unknown" 
+    return "unknown"
+
+def ensure_custom_mod_dir_name_default():
+    s = load_settings()
+    if "custom_mod_dir_name" not in s:
+        s["custom_mod_dir_name"] = "~mods"
+        save_settings(s)
+
+def get_custom_mod_dir_name():
+    ensure_custom_mod_dir_name_default()
+    s = load_settings()
+    return s.get("custom_mod_dir_name", "~mods")
+
+def set_custom_mod_dir_name(name: str):
+    if not name or name.lower() == "logicmods":
+        raise ValueError("Invalid custom mod folder name")
+    s = load_settings()
+    s["custom_mod_dir_name"] = name
+    save_settings(s)
+
+def migrate_disabled_mods_if_needed(game_path):
+    """
+    If the migration flag is not set, move mods from the old disabled folder (inside Paks) to the new sibling DisabledMods folder,
+    then set the flag in settings.json. Should be called at app startup.
+    """
+    s = load_settings()
+    if s.get("disabled_mods_migrated", False):
+        return
+    from mod_manager.pak_manager import get_paks_root_dir, DISABLED_FOLDER_NAME
+    import shutil
+    paks_root = get_paks_root_dir(game_path)
+    if not paks_root:
+        return
+    old_disabled = os.path.join(paks_root, "disabled")
+    obvdata_root = os.path.dirname(paks_root)
+    new_disabled = os.path.join(obvdata_root, DISABLED_FOLDER_NAME)
+    if os.path.isdir(old_disabled):
+        # Move all files and folders from old_disabled to new_disabled
+        for item in os.listdir(old_disabled):
+            src = os.path.join(old_disabled, item)
+            dst = os.path.join(new_disabled, item)
+            try:
+                if os.path.isdir(src):
+                    shutil.move(src, dst)
+                else:
+                    shutil.move(src, dst)
+            except Exception as e:
+                print(f"Error migrating disabled mod {item}: {e}")
+        # Remove old folder
+        try:
+            os.rmdir(old_disabled)
+        except Exception:
+            pass
+    s["disabled_mods_migrated"] = True
+    save_settings(s)
+
+# --- Display Registry Helpers ---
+DISPLAY_FILE = DATA_DIR / 'display_names.json'
+
+def _load_display():
+    try:
+        return json.load(DISPLAY_FILE.open('r', encoding='utf-8'))
+    except Exception:
+        return {}
+
+def _save_display(data: dict):
+    DISPLAY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    json.dump(data, DISPLAY_FILE.open('w', encoding='utf-8'), indent=2)
+
+def get_display_info(mod_id: str):
+    return _load_display().get(mod_id, {})
+
+def set_display_info(mod_id: str, *, display: str = None, group: str = None):
+    data = _load_display()
+    entry = data.get(mod_id, {})
+    if display is not None:
+        entry["display"] = display
+    if group is not None:
+        entry["group"] = group
+    data[mod_id] = entry
+    _save_display(data)
+
+def delete_display_info(mod_id: str):
+    data = _load_display()
+    if mod_id in data:
+        del data[mod_id]
+        _save_display(data) 
