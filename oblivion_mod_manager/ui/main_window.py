@@ -8,11 +8,15 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QListWidget, QListWidgetItem, QFileDialog, QMessageBox, QAbstractItemView, QCheckBox,
     QMenu, QAction, QTabWidget, QInputDialog, QProgressDialog, QFrame, QDialog, QSpacerItem, QSizePolicy,
-    QTableWidget, QTableWidgetItem, QTableView
+    QTableWidget, QTableWidgetItem, QTableView, QTreeView
 )
 from PyQt5.QtCore import Qt, QEvent, QItemSelectionModel, QUrl, QMimeData, QTimer, QByteArray, QSortFilterProxyModel
 from PyQt5.QtGui import QDrag, QPixmap, QColor, QFont, QDragEnterEvent, QDropEvent
-from mod_manager.utils import get_game_path, SETTINGS_PATH, get_esp_folder, DATA_DIR, open_folder_in_explorer, guess_install_type, set_install_type, load_settings, save_settings, get_custom_mod_dir_name, _merge_tree
+from mod_manager.utils import (
+    get_game_path, SETTINGS_PATH, get_esp_folder, DATA_DIR, open_folder_in_explorer,
+    guess_install_type, set_install_type, load_settings, save_settings,
+    get_custom_mod_dir_name, _merge_tree, get_display_info, _display_cache,
+)
 from mod_manager.registry import list_esp_files, read_plugins_txt, write_plugins_txt
 from mod_manager.pak_manager import (
     list_managed_paks, add_pak, remove_pak, scan_for_installed_paks, 
@@ -62,6 +66,7 @@ EXCLUDED_ESPS = [
 from ui.install_type_dialog import InstallTypeDialog
 from mod_manager.ue4ss_installer import ensure_ue4ss_configs
 from ui.jorkTableQT import ModTableModel
+from ui.jorkTreeViewQT import ModTreeModel      # NEW import
 
 class PluginsListWidget(QListWidget):
     def __init__(self, *args, **kwargs):
@@ -289,16 +294,16 @@ class MainWindow(QWidget):
         self.inactive_pak_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.inactive_pak_label.setAlignment(Qt.AlignCenter)
         self.pak_layout.insertWidget(2, self.inactive_pak_label)
-        self.inactive_pak_table = QTableView()
-        self.pak_layout.insertWidget(3, self.inactive_pak_table)
+        self.inactive_pak_view = QTreeView()
+        self.pak_layout.insertWidget(3, self.inactive_pak_view)
 
         # Enabled PAKs label and table
         self.active_pak_label = QLabel("Enabled PAKs (double-click to deactivate):")
         self.active_pak_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.active_pak_label.setAlignment(Qt.AlignCenter)
         self.pak_layout.insertWidget(4, self.active_pak_label)
-        self.active_pak_table = QTableView()
-        self.pak_layout.insertWidget(5, self.active_pak_table)
+        self.active_pak_view = QTreeView()
+        self.pak_layout.insertWidget(5, self.active_pak_view)
 
         # PAK control buttons
         self.pak_button_row = QHBoxLayout()
@@ -500,6 +505,7 @@ class MainWindow(QWidget):
                 background-color: #232323;
                 color: #e0e0e0;
             }
+            QTreeView::item:selected { background:#333; color:#ff9800; }
         """)
 
         self._refresh_ue4ss_status()
@@ -1191,53 +1197,77 @@ class MainWindow(QWidget):
         """Load the list of managed PAK mods into the enabled/disabled tables."""
         if not self.game_path:
             return
+        from mod_manager.utils import get_display_info
+
         reconcile_pak_list(self.game_path)
         pak_mods = list_managed_paks()
-        # Build rows for both tables
+
+        # ── 1) DETACH OLD MODELS so Qt never keeps indexes from a dead proxy ──
+        for _view in (self.active_pak_view, self.inactive_pak_view):
+            _view.setModel(None)
+
+        # ── 2) (Re)build row‑dicts with **display** + **group** information ──
+        cache       = _display_cache()                                       # O(1) lookup
+        by_filename = {cid.split('|')[-1]: info for cid, info in cache.items()}
+
         all_rows = []
         for pak in pak_mods:
+            subfolder = pak.get('subfolder', '') or ''
+            # Normalize subfolder: strip DisabledMods[\/] prefix if present
+            import re
+            norm_subfolder = re.sub(r'^(DisabledMods[\\/]+)', '', subfolder, flags=re.IGNORECASE)
+            norm_mod_id = f"{norm_subfolder}|{pak['name']}"
+            orig_mod_id = f"{subfolder}|{pak['name']}"
+            # Try normalized mod_id, then original, then by filename
+            disp_info = cache.get(norm_mod_id) or cache.get(orig_mod_id) or by_filename.get(pak["name"], {})
             all_rows.append({
-                "id": f"{pak.get('subfolder','')}|{pak['name']}",
-                "real": pak["name"],
+                "id":        orig_mod_id,
+                "real":      pak["name"],
+                "display":   disp_info.get("display", pak["name"]),
+                "group":     disp_info.get("group", ""),
                 "subfolder": pak.get("subfolder"),
-                "active": pak.get("active", True),
-                "pak_info": pak
+                "active":    pak.get("active", True),
+                "pak_info":  pak,
             })
         enabled_rows = [row for row in all_rows if row["active"]]
         disabled_rows = [row for row in all_rows if not row["active"]]
-        # Define the color scheme for tables
-        table_colors = {
-            'background': QColor('#181818'),
-            'foreground': QColor('#e0e0e0'),
-            'selection_background': QColor('#333333'),
-            'selection_foreground': QColor('#ff9800'),
+        # Define the color scheme for trees
+        tree_colors = {
+            'bg':     QColor('#181818'),
+            'fg':     QColor('#e0e0e0'),
+            'selbg':  QColor('#333333'),
+            'selfg':  QColor('#ff9800'),
         }
-        # Define reusable table stylesheet
-        table_stylesheet = """
+        tree_stylesheet = """
+QTreeView {
+    background: #181818;
+    color: #e0e0e0;
+    selection-background-color: #333333;
+    selection-color: #ff9800;
+}
 QHeaderView::section {
     background-color: #232323;
     color: #ff9800;
     font-weight: bold;
     border: 1px solid #444;
 }
-QTableView {
-    selection-background-color: #333333;
-    selection-color: #ff9800;
+QTreeView::item:selected {
+    background:#333333;
+    color:#ff9800;
 }
 """
         # Models and proxies
-        self.active_pak_model = ModTableModel(
+        self.active_pak_model = ModTreeModel(
             enabled_rows,
-            get_show_real=lambda: self.chk_real.isChecked(),
-            parent=self.active_pak_table,
-            colors=table_colors
+            show_real_cb=self.chk_real.isChecked,
+            colors=tree_colors
         )
-        self.inactive_pak_model = ModTableModel(
+        self.inactive_pak_model = ModTreeModel(
             disabled_rows,
-            get_show_real=lambda: self.chk_real.isChecked(),
-            parent=self.inactive_pak_table,
-            colors=table_colors
+            show_real_cb=self.chk_real.isChecked,
+            colors=tree_colors
         )
+
         self.active_pak_proxy = QSortFilterProxyModel(self)
         self.active_pak_proxy.setSourceModel(self.active_pak_model)
         self.active_pak_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
@@ -1246,54 +1276,67 @@ QTableView {
         self.inactive_pak_proxy.setSourceModel(self.inactive_pak_model)
         self.inactive_pak_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self.inactive_pak_proxy.setFilterKeyColumn(-1)
-        self.active_pak_table.setModel(self.active_pak_proxy)
-        self.inactive_pak_table.setModel(self.inactive_pak_proxy)
-        self.active_pak_table.setSortingEnabled(True)
-        self.inactive_pak_table.setSortingEnabled(True)
-        self.active_pak_table.setStyleSheet(table_stylesheet)
-        self.inactive_pak_table.setStyleSheet(table_stylesheet)
-        # Set default column width for first column (Display Name)
-        self.active_pak_table.horizontalHeader().setSectionResizeMode(0, self.active_pak_table.horizontalHeader().Interactive)
-        self.active_pak_table.setColumnWidth(0, 350)
-        self.inactive_pak_table.horizontalHeader().setSectionResizeMode(0, self.inactive_pak_table.horizontalHeader().Interactive)
-        self.inactive_pak_table.setColumnWidth(0, 350)
+
+        for view, proxy in (
+            (self.active_pak_view,   self.active_pak_proxy),
+            (self.inactive_pak_view, self.inactive_pak_proxy)):
+            view.setModel(proxy)
+            view.setHeaderHidden(False)
+            view.setRootIsDecorated(True)
+            view.expandAll()                        # default expanded; user can collapse
+            view.setStyleSheet(tree_stylesheet)     # use the new tree stylesheet
+            try:
+                view.doubleClicked.disconnect()
+            except Exception:
+                pass
+
         # Connect toggles to both models
         self.chk_real.toggled.connect(self.active_pak_model.layoutChanged.emit)
         self.chk_real.toggled.connect(self.inactive_pak_model.layoutChanged.emit)
-        # Search box filters both tables
+
+        # Search box filters both proxies
         self.pak_search.textChanged.connect(self.active_pak_proxy.setFilterFixedString)
         self.pak_search.textChanged.connect(self.inactive_pak_proxy.setFilterFixedString)
         # Double-click to activate/deactivate
         # Disconnect previous connections to avoid multiple triggers and stale proxies
         try:
-            self.active_pak_table.doubleClicked.disconnect()
-            print("[DEBUG] Cleared previous doubleClicked connection for active_pak_table.")
+            self.active_pak_view.doubleClicked.disconnect()
+            print("[DEBUG] Cleared previous doubleClicked connection for active_pak_view.")
         except Exception:
-            print("[DEBUG] No previous doubleClicked connection for active_pak_table to clear.")
+            print("[DEBUG] No previous doubleClicked connection for active_pak_view to clear.")
         try:
-            self.inactive_pak_table.doubleClicked.disconnect()
-            print("[DEBUG] Cleared previous doubleClicked connection for inactive_pak_table.")
+            self.inactive_pak_view.doubleClicked.disconnect()
+            print("[DEBUG] Cleared previous doubleClicked connection for inactive_pak_view.")
         except Exception:
-            print("[DEBUG] No previous doubleClicked connection for inactive_pak_table to clear.")
-        self.active_pak_table.doubleClicked.connect(self._deactivate_pak_table_row)
-        print("[DEBUG] Connected doubleClicked for active_pak_table.")
-        self.inactive_pak_table.doubleClicked.connect(self._activate_pak_table_row)
-        print("[DEBUG] Connected doubleClicked for inactive_pak_table.")
+            print("[DEBUG] No previous doubleClicked connection for inactive_pak_view to clear.")
+        self.active_pak_view.doubleClicked.connect(self._deactivate_pak_view_row)
+        print("[DEBUG] Connected doubleClicked for active_pak_view.")
+        self.inactive_pak_view.doubleClicked.connect(self._activate_pak_view_row)
+        print("[DEBUG] Connected doubleClicked for inactive_pak_view.")
         # Context menus
-        self.active_pak_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.active_pak_table.customContextMenuRequested.connect(lambda pos: self._show_pak_table_context_menu(pos, enabled=True))
-        self.inactive_pak_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.inactive_pak_table.customContextMenuRequested.connect(lambda pos: self._show_pak_table_context_menu(pos, enabled=False))
+        self.active_pak_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.active_pak_view.customContextMenuRequested.connect(lambda pos: self._show_pak_view_context_menu(pos, enabled=True))
+        self.inactive_pak_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.inactive_pak_view.customContextMenuRequested.connect(lambda pos: self._show_pak_view_context_menu(pos, enabled=False))
 
-    def _activate_pak_table_row(self, index):
+        # DEBUG: Print cache keys and first 5 disabled row ids
+        print("_display_cache keys:", list(cache.keys()))
+        print("disabled_rows ids:", [r['id'] for r in disabled_rows][:5])
+
+    def _activate_pak_view_row(self, index):
         # Activate a PAK from the disabled table
         if not index.isValid():
             return
         src_index = self.inactive_pak_proxy.mapToSource(index)
-        row = src_index.row()
-        if row >= len(self.inactive_pak_model._rows):
+        is_grp, node = self._is_group_index(src_index)
+        if is_grp:
+            # bulk‑activate all child leaf nodes
+            for child in node.children:
+                if not child.is_group:
+                    activate_pak(self.game_path, child.data["pak_info"])
+            self._load_pak_list()
             return
-        pak_info = self.inactive_pak_model._rows[row]["pak_info"]
+        pak_info = node.data["pak_info"]
         success = activate_pak(self.game_path, pak_info)
         if not success:
             self.show_status(f"Error: Failed to activate PAK mod: {pak_info['name']}", 5000, "error")
@@ -1301,15 +1344,19 @@ QTableView {
             self.show_status(f"Activated PAK mod: {pak_info['name']}", 3000, "success")
         self._load_pak_list()
 
-    def _deactivate_pak_table_row(self, index):
+    def _deactivate_pak_view_row(self, index):
         # Deactivate a PAK from the enabled table
         if not index.isValid():
             return
         src_index = self.active_pak_proxy.mapToSource(index)
-        row = src_index.row()
-        if row >= len(self.active_pak_model._rows):
+        is_grp, node = self._is_group_index(src_index)
+        if is_grp:
+            for child in node.children:
+                if not child.is_group:
+                    deactivate_pak(self.game_path, child.data["pak_info"])
+            self._load_pak_list()
             return
-        pak_info = self.active_pak_model._rows[row]["pak_info"]
+        pak_info = node.data["pak_info"]
         success = deactivate_pak(self.game_path, pak_info)
         if not success:
             self.show_status(f"Error: Failed to deactivate PAK mod: {pak_info['name']}", 5000, "error")
@@ -1317,55 +1364,92 @@ QTableView {
             self.show_status(f"Deactivated PAK mod: {pak_info['name']}", 3000, "success")
         self._load_pak_list()
 
-    def _show_pak_table_context_menu(self, pos, enabled):
-        from mod_manager.utils import get_display_info, set_display_info  # Ensure available for both actions
-        table = self.active_pak_table if enabled else self.inactive_pak_table
-        proxy = self.active_pak_proxy if enabled else self.inactive_pak_proxy
-        model = self.active_pak_model if enabled else self.inactive_pak_model
-        index = table.indexAt(pos)
+    def _show_pak_view_context_menu(self, pos, enabled):
+        """
+        Context‑menu handler for both enabled/disabled PAK trees.
+        Robust against model refreshes: it always queries the *current*
+        model attached to the view, so mapToSource() never sees an index
+        from the wrong proxy.
+        """
+        # ----- figure out which view the user clicked in -----
+        view = self.active_pak_view if enabled else self.inactive_pak_view
+        index = view.indexAt(pos)
         if not index.isValid():
             return
-        src_index = proxy.mapToSource(index)
-        row = src_index.row()
-        mod_id = model._rows[row]["id"]
-        pak_info = model._rows[row]["pak_info"]
+
+        # ----- get the model(s) presently wired to that view -----
+        view_model = view.model()                     # may be proxy or source
+        if isinstance(view_model, QSortFilterProxyModel):
+            src_index = view_model.mapToSource(index)
+            model     = view_model.sourceModel()
+        else:
+            src_index = index                         # already source
+            model     = view_model
+
+        node = src_index.internalPointer()            # our custom _Node
+
+        # Skip group headers (optional)
+        if getattr(node, "is_group", False):
+            return
+
+        # Extract data for the selected mod
+        mod_data = node.data          # dict with 'id', 'pak_info', …
+        mod_id   = mod_data["id"]
+        pak_info = mod_data["pak_info"]
+
+        # ---------- build and show context menu ----------
         from PyQt5.QtWidgets import QMenu, QInputDialog, QMessageBox
-        menu = QMenu(self)
-        rename_action = menu.addAction("Rename Display Name…")
-        group_action = menu.addAction("Set Group…")
-        delete_action = menu.addAction("Delete PAK Mod")
-        action = menu.exec_(table.viewport().mapToGlobal(pos))
+        context_menu = QMenu(self)
+        rename_action = context_menu.addAction("Rename Display Name…")
+        group_action  = context_menu.addAction("Set Group…")
+        delete_action = context_menu.addAction("Delete PAK Mod")
+        action = context_menu.exec_(view.viewport().mapToGlobal(pos))
+        # (The remaining logic is unchanged; just replace every
+        #  previous occurrence of 'proxy._rows[row]' / 'table' with
+        #  the new local variables mod_data / view.)
         if action == rename_action:
-            current = model._rows[row]["real"]
-            text, ok = QInputDialog.getText(self, "Rename Display Name", "Display Name:", text=current)
-            if ok:
-                new_name = text.strip()
-                if not new_name:
-                    QMessageBox.warning(self, "Invalid Name", "Display name cannot be blank.")
-                    return
-                all_display_names = set()
-                for i, r in enumerate(model._rows):
-                    if i == row:
-                        continue
-                    mod_id_i = r["id"]
-                    disp_i = get_display_info(mod_id_i)
-                    name_i = disp_i.get("display", r["real"])
-                    all_display_names.add(name_i.strip().lower())
-                if new_name.lower() in all_display_names:
-                    QMessageBox.warning(self, "Duplicate Name", "That display name is already used by another mod.")
-                    return
-                set_display_info(mod_id, display=new_name)
-                from PyQt5.QtCore import QTimer
-                QTimer.singleShot(0, self._load_pak_list)
-                return  # Prevent use of stale model/proxy
+            from mod_manager.utils import get_display_info, set_display_info
+            # default text = real file name
+            current_text = mod_data["real"]
+            text, ok = QInputDialog.getText(
+                self, "Rename Display Name", "Display Name:", text=current_text
+            )
+            if not ok:
+                return
+            new_name = text.strip()
+            if not new_name:
+                QMessageBox.warning(self, "Invalid Name", "Display name cannot be blank.")
+                return
+
+            # build set of existing display names (to avoid duplicates)
+            existing = {
+                get_display_info(leaf.data["id"]).get("display", leaf.data["real"]).strip().lower()
+                for leaf in _iter_leaf_nodes(model.root)
+                if isinstance(leaf.data, dict) and "id" in leaf.data
+            }
+            existing.discard(current_text.strip().lower())
+
+            if new_name.lower() in existing:
+                QMessageBox.warning(self, "Duplicate Name",
+                                    "That display name is already used by another mod.")
+                return
+
+            set_display_info(mod_id, display=new_name)
+            self._load_pak_list()         # refresh view
+            return
+
         elif action == group_action:
-            current = get_display_info(mod_id).get("group", "")
-            text, ok = QInputDialog.getText(self, "Set Group", "Group:", text=current)
-            if ok:
-                set_display_info(mod_id, group=text.strip())
-                from PyQt5.QtCore import QTimer
-                QTimer.singleShot(0, self._load_pak_list)
-                return  # Prevent use of stale model/proxy
+            from mod_manager.utils import get_display_info, set_display_info
+            current_group = get_display_info(mod_id).get("group", "")
+            text, ok = QInputDialog.getText(
+                self, "Set Group", "Group:", text=current_group
+            )
+            if not ok:
+                return
+            set_display_info(mod_id, group=text.strip())
+            self._load_pak_list()
+            return
+
         elif action == delete_action:
             self.delete_pak_mod(pak_info)
             return
@@ -1905,6 +1989,11 @@ QTableView {
             if folder_name:
                 self.mod_dir_edit.setText(folder_name)
 
+    def _is_group_index(self, src_index):
+        """Return (is_group, node) where node is internalPointer()."""
+        node = src_index.internalPointer()
+        return (getattr(node, "is_group", False), node)
+
 class MigrateModsDialog(QDialog):
     def __init__(self, old_dir, new_dir, parent=None):
         super().__init__(parent)
@@ -1987,6 +2076,16 @@ def migrate_mods(old_dir, new_dir, parent=None):
             pass
     dlg.setValue(len(file_list))
     return moved
+
+def _iter_leaf_nodes(node):
+    """Depth‑first generator that yields every leaf (non‑group) node."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if getattr(n, "is_group", False):
+            stack.extend(n.children)
+        else:
+            yield n
 
 def run():
     app = QApplication(sys.argv)

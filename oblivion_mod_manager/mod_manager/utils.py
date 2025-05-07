@@ -202,6 +202,17 @@ def migrate_disabled_mods_if_needed(game_path):
     s["disabled_mods_migrated"] = True
     save_settings(s)
 
+# --- In‑memory cache to avoid repeated disk reads --------------------------
+_DISPLAY_CACHE = None
+
+def _display_cache():
+    """Return (and lazily populate) the in‑memory display‑info dict."""
+    global _DISPLAY_CACHE
+    if _DISPLAY_CACHE is None:
+        _DISPLAY_CACHE = _load_display()   # existing helper reads from disk
+    return _DISPLAY_CACHE
+# ---------------------------------------------------------------------------
+
 # --- Display Registry Helpers ---
 DISPLAY_FILE = DATA_DIR / 'display_names.json'
 
@@ -214,25 +225,29 @@ def _load_display():
 def _save_display(data: dict):
     DISPLAY_FILE.parent.mkdir(parents=True, exist_ok=True)
     json.dump(data, DISPLAY_FILE.open('w', encoding='utf-8'), indent=2)
+    global _DISPLAY_CACHE          # <‑‑ add this line
+    _DISPLAY_CACHE = data          # keep cache in sync
 
 def get_display_info(mod_id: str):
-    return _load_display().get(mod_id, {})
+    """Return cached display info dict for a given mod id."""
+    return _display_cache().get(mod_id, {})
 
 def set_display_info(mod_id: str, *, display: str = None, group: str = None):
-    data = _load_display()
+    data = _display_cache()
     entry = data.get(mod_id, {})
     if display is not None:
         entry["display"] = display
     if group is not None:
         entry["group"] = group
     data[mod_id] = entry
-    _save_display(data)
+    _save_display(data)            # writes to disk
+    # cache already updated in‑place
 
 def delete_display_info(mod_id: str):
-    data = _load_display()
+    data = _display_cache()
     if mod_id in data:
         del data[mod_id]
-        _save_display(data)
+        _save_display(data)        # writes and keeps cache consistent
 
 def _merge_tree(src_dir: str, dest_dir: str):
     """
