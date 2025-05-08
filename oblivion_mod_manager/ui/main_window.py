@@ -229,6 +229,12 @@ class MainWindow(QWidget):
         self.hide_stock_checkbox.stateChanged.connect(self.refresh_lists)
         checkbox_layout.addWidget(self.hide_stock_checkbox, 0, Qt.AlignRight | Qt.AlignVCenter)
 
+        # Add Load‑Order checkbox
+        self.load_order_mode = QCheckBox("Load‑order mode")
+        self.load_order_mode.setChecked(False)
+        self.load_order_mode.toggled.connect(self._esp_toggle_layout)
+        checkbox_layout.addWidget(self.load_order_mode)
+
         # Add empty widget with same width as checkbox container for balance
         spacer_widget = QWidget()
         spacer_widget.setFixedWidth(150)  # Increased from 120 to 150
@@ -251,6 +257,20 @@ class MainWindow(QWidget):
 
         self.esp_enabled_view = ModTreeBrowser([], parent=self)
         self.esp_layout.addWidget(self.esp_enabled_view)
+
+        self.esp_enabled_view.doubleClicked.connect(self._deactivate_esp_row)
+        self.esp_disabled_view.doubleClicked.connect(self._activate_esp_row)
+
+        # Legacy flat lists for load‑order mode  ↓↓↓
+        self.disabled_mods_list = PluginsListWidget()
+        self.enabled_mods_list  = PluginsListWidget()
+        self.enabled_mods_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.enabled_mods_list.set_reorder_callback(self.update_plugins_txt_from_enabled_list)
+        # Add them to layout but keep invisible
+        self.esp_layout.addWidget(self.disabled_mods_list)
+        self.esp_layout.addWidget(self.enabled_mods_list)
+        for w in (self.disabled_mods_list, self.enabled_mods_list):
+            w.hide()
 
         # Apply consistent tree styling as in PAK/UE4SS tabs
         tree_stylesheet = """
@@ -1127,6 +1147,10 @@ QTreeView::item:selected {
             self.path_input.setText(self.game_path)
 
     def refresh_lists(self):
+        # short‑circuit when load‑order mode is active
+        if getattr(self, "load_order_mode", None) and self.load_order_mode.isChecked():
+            self._populate_flat_lists()
+            return
         from ui.row_builders import rows_from_esps
         esp_files = list_esp_files()
         mod_esps = [esp for esp in esp_files if esp not in DEFAULT_LOAD_ORDER and esp not in EXCLUDED_ESPS]
@@ -1649,6 +1673,9 @@ QTreeView::item:selected {
         write_plugins_txt(new_order)
         self.show_status("Load order updated.", 2000, "success")
 
+        if self.load_order_mode.isChecked():
+            self._populate_flat_lists()
+
     def open_current_tab_folder(self):
         """
         Open the ESP, PAK, or UE4SS directory depending on the selected tab.
@@ -2041,6 +2068,70 @@ QTreeView::item:selected {
         """Return (is_group, node) where node is internalPointer()."""
         node = src_index.internalPointer()
         return (getattr(node, "is_group", False), node)
+
+    def _esp_toggle_layout(self, on: bool):
+        # Tree widgets
+        for w in (self.esp_enabled_view, self.esp_disabled_view):
+            w.setVisible(not on)
+        # Flat lists
+        for w in (self.enabled_mods_list, self.disabled_mods_list):
+            w.setVisible(on)
+        if on:
+            self._populate_flat_lists()
+        else:
+            self.refresh_lists()
+
+    def _populate_flat_lists(self):
+        """Fill legacy QListWidgets from current plugins.txt + disk scan."""
+        enabled, disabled = [], []
+        esp_files = list_esp_files()
+        mod_esps  = [e for e in esp_files
+                     if e not in DEFAULT_LOAD_ORDER and e not in EXCLUDED_ESPS]
+        for line in read_plugins_txt():
+            name = line.lstrip('#').strip()
+            if name in mod_esps:
+                (disabled if line.startswith('#') else enabled).append(name)
+        # mods not in plugins.txt are disabled
+        for e in mod_esps:
+            if e not in enabled and e not in disabled:
+                disabled.append(e)
+
+        def fill(widget, items):
+            widget.clear()
+            for it in items:
+                QListWidgetItem(it, widget)
+
+        fill(self.enabled_mods_list, enabled)
+        fill(self.disabled_mods_list, disabled)
+
+    def _esp_set_enabled(self, esp_name: str, enabled: bool):
+        plugins = read_plugins_txt()
+        plugins = [p for p in plugins if p.lstrip('#').strip() != esp_name]
+        plugins.append(esp_name if enabled else f'#{esp_name}')
+        write_plugins_txt(plugins)
+
+    def _activate_esp_row(self, index):
+        src = self.esp_disabled_view._proxy.mapToSource(index)
+        node = src.internalPointer()
+        if node and not node.is_group:
+            self._esp_set_enabled(node.data["real"], True)
+            self.refresh_lists()
+
+    def _deactivate_esp_row(self, index):
+        src = self.esp_enabled_view._proxy.mapToSource(index)
+        node = src.internalPointer()
+        if node and not node.is_group and node.data["real"] not in DEFAULT_LOAD_ORDER:
+            self._esp_set_enabled(node.data["real"], False)
+            self.refresh_lists()
+
+    def _toggle_ue4ss_mod(self, index, enable: bool):
+        view = self.ue4ss_disabled_view if enable else self.ue4ss_enabled_view
+        src = view._proxy.mapToSource(index)
+        node = src.internalPointer()
+        if node and not node.is_group:
+            from mod_manager.ue4ss_installer import set_ue4ss_mod_enabled
+            set_ue4ss_mod_enabled(self.game_path, node.data["real"], enable)
+            self._refresh_ue4ss_status()
 
 class MigrateModsDialog(QDialog):
     def __init__(self, old_dir, new_dir, parent=None):
