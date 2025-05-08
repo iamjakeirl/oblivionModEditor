@@ -154,8 +154,8 @@ class ModTreeBrowser(QTreeView):
 
     def _rename_group(self, group_node):
         """Rename a group and update all contained mods."""
-        from PyQt5.QtWidgets import QInputDialog, QMessageBox
-        from mod_manager.utils import get_display_info, set_display_info_bulk
+        from PyQt5.QtWidgets import QInputDialog
+        from mod_manager.utils import set_display_info_bulk
         
         # Get current group path
         path_parts = []
@@ -191,17 +191,6 @@ class ModTreeBrowser(QTreeView):
             changes.append((mod_id, new_path))
         
         if not changes:
-            return
-            
-        # Confirm the change
-        reply = QMessageBox.question(
-            self,
-            "Confirm Group Rename",
-            f"Rename group '{current_path}' to '{new_path}'?\nThis will affect {len(changes)} mod(s).",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        if reply != QMessageBox.Yes:
             return
             
         # Apply changes in bulk
