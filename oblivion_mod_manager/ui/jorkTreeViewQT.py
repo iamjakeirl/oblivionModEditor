@@ -1,6 +1,7 @@
-from PyQt5.QtCore import Qt, QAbstractItemModel, QModelIndex, QVariant
+from PyQt5.QtCore import Qt, QAbstractItemModel, QModelIndex, QVariant, QMimeData, QTimer, QCoreApplication
 from PyQt5.QtGui  import QColor
-from mod_manager.utils import get_display_info
+from mod_manager.utils import get_display_info, set_display_info
+import traceback
 
 class _Node:
     def __init__(self, data: dict | str, parent=None, is_group=False):
@@ -15,18 +16,29 @@ class _Node:
 
 class ModTreeModel(QAbstractItemModel):
     COLS = ["Display\u00A0Name"]      # Only one column now
+    MIME = "obmm/mod-ids"
 
-    def __init__(self, rows, *, show_real_cb, colors=None, parent=None):
+    def __init__(self, rows, *, show_real_cb=None, colors=None, parent=None):
         super().__init__(parent)
-        self.colors      = colors or {
+        self.colors = colors or {
             'bg':  QColor('#181818'),
             'fg':  QColor('#e0e0e0'),
             'selbg': QColor('#333333'),
             'selfg': QColor('#ff9800'),
         }
-        self.show_real   = show_real_cb
-        self.root        = _Node("ROOT")
-        self._build_tree(rows)
+
+        # ――― make sure we always have a callable ―――
+        if show_real_cb is None:
+            self.show_real = lambda: False
+        elif callable(show_real_cb):
+            self.show_real = show_real_cb
+        else:                          # a bool was passed in by mistake
+            val            = bool(show_real_cb)
+            self.show_real = lambda v=val: v
+
+        self._rows = list(rows)            # keep a copy – we'll mutate it in one place only
+        self.root  = _Node("ROOT")
+        self._build_tree()                 # ← no args any more
 
     # ------------- public helpers -------------
     def index(self, row, col, parent=QModelIndex()):
@@ -34,10 +46,13 @@ class ModTreeModel(QAbstractItemModel):
         return self.createIndex(row, col, node.child(row))
 
     def parent(self, index):
-        if not index.isValid(): return QModelIndex()
+        if not index.isValid():
+            return QModelIndex()
         node = index.internalPointer()
-        if node.parent == self.root: return QModelIndex()
-        return self.createIndex(node.parent.row(), 0, node.parent)
+        par  = node.parent
+        if par in (None, self.root) or node not in par.children:
+            return QModelIndex()            # ← avoids the ValueError you saw
+        return self.createIndex(par.row(), 0, par)
 
     def rowCount(self, parent=QModelIndex()):
         node = parent.internalPointer() if parent.isValid() else self.root
@@ -83,17 +98,22 @@ class ModTreeModel(QAbstractItemModel):
 
     def flags(self, index):
         node = index.internalPointer()
-        if node.is_group:                            # group headers not editable/selectable
+        if node is None:                             # safety for transient Qt indexes
             return Qt.ItemIsEnabled
-        base = Qt.ItemIsSelectable | Qt.ItemIsEnabled
+        if node.is_group:
+            return Qt.ItemIsEnabled | Qt.ItemIsDropEnabled
+        base = (Qt.ItemIsSelectable | Qt.ItemIsEnabled |
+                Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)     # drag/drop, multi‑select
         if index.column() == 0:
             base |= Qt.ItemIsEditable
         return base
 
     # ------------- private helpers -------------
-    def _build_tree(self, rows):
+    def _build_tree(self):
+        """(Re)populate self.root using self._rows."""
+        self.root.children.clear()
         groups = {}
-        for r in rows:
+        for r in self._rows:
             # Fallback logic for group lookup
             disp = get_display_info(r["id"])
             if not disp.get("group"):
@@ -115,4 +135,71 @@ class ModTreeModel(QAbstractItemModel):
                     parent.children.append(node)
                     groups[key] = node
                 parent = groups[key]
-            parent.children.append(_Node(r, parent, is_group=False)) 
+            parent.children.append(_Node(r, parent, is_group=False))
+
+        # Only populate self.root.children; do not reset the model here
+        return True
+
+    # drag‑export ----------------------------------------------------------
+    def mimeTypes(self):                 return [self.MIME]
+    def mimeData(self, indexes):
+        from PyQt5.QtCore import QMimeData
+        ids = []
+        for i in indexes:
+            if not i.isValid():
+                continue
+            node = i.internalPointer()
+            if not node or node.is_group:
+                continue
+            ids.append(node.data["id"])
+        md = QMimeData()
+        md.setData(self.MIME, ",".join(ids).encode())
+        return md
+    # drag‑import ----------------------------------------------------------
+    def supportedDragActions(self):      return Qt.MoveAction
+    def supportedDropActions(self):      return Qt.MoveAction
+
+    def dropMimeData(self, data, action, row, col, parent_index):
+        if action != Qt.MoveAction or not data.hasFormat(self.MIME):
+            return False
+        target_node = parent_index.internalPointer() if parent_index.isValid() else None
+        if not target_node:
+            return False
+
+        # Accept drop on group header OR any child within a group
+        if target_node.is_group:
+            group_path = target_node.data
+        else:
+            ancestor = target_node.parent
+            if not ancestor or not ancestor.is_group:
+                return False
+            group_path = ancestor.data
+        moved_ids = data.data(self.MIME).data().decode().split(",")
+        for mid in moved_ids:
+            set_display_info(mid, group=group_path)
+
+        print(f'\n[DND] dropMimeData called on model {id(self)}')
+        
+        # First emit signal to capture expansion state
+        self.layoutAboutToBeChanged.emit()
+        
+        # Allow a moment for capture to complete
+        QCoreApplication.processEvents()
+        
+        # Do the reset
+        self.set_rows(self._rows)
+        
+        # Signal that model layout is complete (will trigger delayed expansion)
+        self.layoutChanged.emit()
+        
+        return True
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Public API – called by browser / drag‑code
+    def set_rows(self, rows):
+        """Atomic 'replace everything' that's safe for Qt indexes."""
+        self.beginResetModel()              # <‑‑ tell Qt old indexes are dead
+        self._rows = list(rows)
+        self.root  = _Node("ROOT")          # brand‑new root every time
+        self._build_tree()
+        self.endResetModel()                # <‑‑ new indexes are now valid 

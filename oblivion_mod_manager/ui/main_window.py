@@ -13,9 +13,11 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QEvent, QItemSelectionModel, QUrl, QMimeData, QTimer, QByteArray, QSortFilterProxyModel
 from PyQt5.QtGui import QDrag, QPixmap, QColor, QFont, QDragEnterEvent, QDropEvent
 from mod_manager.utils import (
+    migrate_display_keys_if_needed,               #  ← NEW
     get_game_path, SETTINGS_PATH, get_esp_folder, DATA_DIR, open_folder_in_explorer,
     guess_install_type, set_install_type, load_settings, save_settings,
     get_custom_mod_dir_name, _merge_tree, get_display_info, _display_cache,
+    set_display_info, set_display_info_bulk
 )
 from mod_manager.registry import list_esp_files, read_plugins_txt, write_plugins_txt
 from mod_manager.pak_manager import (
@@ -67,6 +69,8 @@ from ui.install_type_dialog import InstallTypeDialog
 from mod_manager.ue4ss_installer import ensure_ue4ss_configs
 from ui.jorkTableQT import ModTableModel
 from ui.jorkTreeViewQT import ModTreeModel      # NEW import
+from ui.jorkTreeBrowser import ModTreeBrowser
+from ui.row_builders import rows_from_paks, rows_from_esps
 
 class PluginsListWidget(QListWidget):
     def __init__(self, *args, **kwargs):
@@ -111,6 +115,12 @@ class PluginsListWidget(QListWidget):
 
 class MainWindow(QWidget):
     def __init__(self):
+        # -----------------------------------------------------------
+        # One‑time migration of legacy "None|MyMod.pak" display keys
+        # (does nothing if the settings flag is already true)
+        # -----------------------------------------------------------
+        migrate_display_keys_if_needed()
+
         super().__init__()
         self.setWindowTitle("jorkXL's Oblivion Remastered Mod Manager")
         self.resize(720, 720)
@@ -186,13 +196,9 @@ class MainWindow(QWidget):
         self.disabled_mods_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.disabled_mods_label.setAlignment(Qt.AlignCenter)
         self.esp_layout.addWidget(self.disabled_mods_label)
-        self.disabled_mods_list = QListWidget()
-        self.disabled_mods_list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.disabled_mods_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.disabled_mods_list.itemDoubleClicked.connect(self.enable_mod)
-        self.disabled_mods_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.disabled_mods_list.customContextMenuRequested.connect(self.show_context_menu)
-        self.esp_layout.addWidget(self.disabled_mods_list)
+        from ui.row_builders import rows_from_esps
+        self.esp_disabled_view = ModTreeBrowser([], parent=self)
+        self.esp_layout.addWidget(self.esp_disabled_view)
 
         # Create a frame to act as the header bar
         enabled_header = QFrame()
@@ -243,15 +249,33 @@ class MainWindow(QWidget):
         # Add the header frame to the main layout
         self.esp_layout.addWidget(enabled_header)
 
-        self.enabled_mods_list = PluginsListWidget()
-        self.enabled_mods_list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.enabled_mods_list.setDragDropMode(QAbstractItemView.InternalMove)
-        self.enabled_mods_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.enabled_mods_list.itemDoubleClicked.connect(self.disable_mod)
-        self.enabled_mods_list.customContextMenuRequested.connect(self.show_context_menu)
-        self.esp_layout.addWidget(self.enabled_mods_list)
-        # Set reorder callback
-        self.enabled_mods_list.set_reorder_callback(self.update_plugins_txt_from_enabled_list)
+        self.esp_enabled_view = ModTreeBrowser([], parent=self)
+        self.esp_layout.addWidget(self.esp_enabled_view)
+
+        # Apply consistent tree styling as in PAK/UE4SS tabs
+        tree_stylesheet = """
+QTreeView {
+    background: #181818;
+    color: #e0e0e0;
+    selection-background-color: #333333;
+    selection-color: #ff9800;
+}
+QHeaderView::section {
+    background-color: #232323;
+    color: #ff9800;
+    font-weight: bold;
+    border: 1px solid #444;
+}
+QTreeView::item:selected {
+    background:#333333;
+    color:#ff9800;
+}
+"""
+        for view in (self.esp_enabled_view, self.esp_disabled_view):
+            view.setHeaderHidden(False)
+            view.setRootIsDecorated(True)
+            view.expandAll()
+            view.setStyleSheet(tree_stylesheet)
 
         # Bottom buttons in a horizontal layout
         self.button_row = QHBoxLayout()
@@ -294,7 +318,8 @@ class MainWindow(QWidget):
         self.inactive_pak_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.inactive_pak_label.setAlignment(Qt.AlignCenter)
         self.pak_layout.insertWidget(2, self.inactive_pak_label)
-        self.inactive_pak_view = QTreeView()
+        self.inactive_pak_view = ModTreeBrowser([], search_box=self.pak_search,
+                                                show_real_cb=self.chk_real.isChecked)
         self.pak_layout.insertWidget(3, self.inactive_pak_view)
 
         # Enabled PAKs label and table
@@ -302,7 +327,8 @@ class MainWindow(QWidget):
         self.active_pak_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.active_pak_label.setAlignment(Qt.AlignCenter)
         self.pak_layout.insertWidget(4, self.active_pak_label)
-        self.active_pak_view = QTreeView()
+        self.active_pak_view = ModTreeBrowser([], search_box=self.pak_search,
+                                              show_real_cb=self.chk_real.isChecked)
         self.pak_layout.insertWidget(5, self.active_pak_view)
 
         # PAK control buttons
@@ -327,26 +353,17 @@ class MainWindow(QWidget):
         self.ue4ss_disabled_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.ue4ss_disabled_label.setAlignment(Qt.AlignCenter)
         self.ue4ss_layout.addWidget(self.ue4ss_disabled_label)
-        self.ue4ss_disabled_list = QListWidget()
-        self.ue4ss_disabled_list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.ue4ss_disabled_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.ue4ss_disabled_list.itemDoubleClicked.connect(self.enable_ue4ss_mod)
-        self.ue4ss_disabled_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.ue4ss_disabled_list.customContextMenuRequested.connect(self._show_ue4ss_context_menu)
-        self.ue4ss_layout.addWidget(self.ue4ss_disabled_list)
+        from ui.row_builders import rows_from_ue4ss
+        self.ue4ss_disabled_view = ModTreeBrowser([], parent=self)
+        self.ue4ss_layout.addWidget(self.ue4ss_disabled_view)
 
         # Enabled UE4SS mods list (bottom)
         self.ue4ss_enabled_label = QLabel("Enabled UE4SS Mods (double-click to disable):")
         self.ue4ss_enabled_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.ue4ss_enabled_label.setAlignment(Qt.AlignCenter)
         self.ue4ss_layout.addWidget(self.ue4ss_enabled_label)
-        self.ue4ss_enabled_list = QListWidget()
-        self.ue4ss_enabled_list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.ue4ss_enabled_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.ue4ss_enabled_list.itemDoubleClicked.connect(self.disable_ue4ss_mod)
-        self.ue4ss_enabled_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.ue4ss_enabled_list.customContextMenuRequested.connect(self._show_ue4ss_context_menu)
-        self.ue4ss_layout.addWidget(self.ue4ss_enabled_list)
+        self.ue4ss_enabled_view = ModTreeBrowser([], parent=self)
+        self.ue4ss_layout.addWidget(self.ue4ss_enabled_view)
 
         # status label (updated by _refresh_ue4ss_status)
         self.ue4ss_status = QLabel("")
@@ -633,6 +650,16 @@ class MainWindow(QWidget):
 
         self.notebook.addTab(self.settings_frame, "Settings")
         # -------------------------------------------------------------------
+
+        print("\n[MODEL-DEBUG] === MainWindow.__init__ STARTING ===")
+
+    def _print_model_relationships(self, context=""):
+        """Debug helper to print model relationships."""
+        print(f"\n[MODEL-DEBUG] === {context} ===")
+        print(f"[MODEL-DEBUG] self.active_pak_model: {id(self.active_pak_model) if hasattr(self, 'active_pak_model') else 'N/A'}")
+        print(f"[MODEL-DEBUG] self.inactive_pak_model: {id(self.inactive_pak_model) if hasattr(self, 'inactive_pak_model') else 'N/A'}")
+        print(f"[MODEL-DEBUG] self.active_pak_view._model: {id(self.active_pak_view._model) if hasattr(self, 'active_pak_view') else 'N/A'}")
+        print(f"[MODEL-DEBUG] self.inactive_pak_view._model: {id(self.inactive_pak_view._model) if hasattr(self, 'inactive_pak_view') else 'N/A'}")
 
     # Add drag and drop event handlers
     def dragEnterEvent(self, event: QDragEnterEvent):
@@ -1100,52 +1127,30 @@ class MainWindow(QWidget):
             self.path_input.setText(self.game_path)
 
     def refresh_lists(self):
-        # Get all ESP files from data folder (source of truth for available mods)
+        from ui.row_builders import rows_from_esps
         esp_files = list_esp_files()
         mod_esps = [esp for esp in esp_files if esp not in DEFAULT_LOAD_ORDER and esp not in EXCLUDED_ESPS]
-        
-        # Get plugins.txt content - both enabled and disabled (commented)
         plugins_lines = read_plugins_txt()
-        
-        # Track enabled and disabled mods
         enabled_mods = []
         disabled_mods = []
-        
-        # Parse plugins.txt content
-        plugins_in_file = set()  # All ESPs mentioned in plugins.txt, commented or not
+        plugins_in_file = set()
         for line in plugins_lines:
             name = line.lstrip('#').strip()
-            if name in mod_esps:  # Only consider user mods, not default/excluded
+            if name in mod_esps:
                 plugins_in_file.add(name)
                 if line.startswith('#'):
                     disabled_mods.append(name)
                 else:
-                    enabled_mods.append(line)
-        
-        # Add mods that exist in data folder but not in plugins.txt to disabled list
+                    enabled_mods.append(name)
         for esp in mod_esps:
             if esp not in plugins_in_file:
                 disabled_mods.append(esp)
-        
-        # Update disabled mods list
-        self.disabled_mods_list.clear()
-        for esp in sorted(disabled_mods, key=str.lower):
-            self.disabled_mods_list.addItem(esp)
-        
-        # Update enabled mods list
-        self.enabled_mods_list.clear()
-        # First add default ESPs unless hidden
-        if not self.hide_stock_checkbox.isChecked():
-            for esp in DEFAULT_LOAD_ORDER:
-                if any(p.lstrip('#').strip() == esp for p in plugins_lines):
-                    item = QListWidgetItem(esp)
-                    self.enabled_mods_list.addItem(item)
-        
-        # Then add user-enabled mods
-        for plugin in enabled_mods:
-            if plugin.lstrip('#').strip() not in DEFAULT_LOAD_ORDER:
-                item = QListWidgetItem(plugin)
-                self.enabled_mods_list.addItem(item)
+        # Build rows and refresh tree views
+        rows = rows_from_esps(enabled_mods, disabled_mods)
+        enabled_rows = [r for r in rows if r["active"]]
+        disabled_rows = [r for r in rows if not r["active"]]
+        self.esp_enabled_view.refresh_rows(enabled_rows)
+        self.esp_disabled_view.refresh_rows(disabled_rows)
 
     def enable_mod(self, item):
         esp = item.text()
@@ -1202,33 +1207,16 @@ class MainWindow(QWidget):
         reconcile_pak_list(self.game_path)
         pak_mods = list_managed_paks()
 
-        # ── 1) DETACH OLD MODELS so Qt never keeps indexes from a dead proxy ──
+        # ── 1) DETACH OLD MODELS so Qt never keeps indexes from a dead proxy ──
         for _view in (self.active_pak_view, self.inactive_pak_view):
             _view.setModel(None)
 
         # ── 2) (Re)build row‑dicts with **display** + **group** information ──
-        cache       = _display_cache()                                       # O(1) lookup
-        by_filename = {cid.split('|')[-1]: info for cid, info in cache.items()}
-
-        all_rows = []
-        for pak in pak_mods:
-            subfolder = pak.get('subfolder', '') or ''
-            # Normalize subfolder: strip DisabledMods[\/] prefix if present
+        cache = _display_cache()                                       # O(1) lookup
+        def normalize_cb(subfolder):
             import re
-            norm_subfolder = re.sub(r'^(DisabledMods[\\/]+)', '', subfolder, flags=re.IGNORECASE)
-            norm_mod_id = f"{norm_subfolder}|{pak['name']}"
-            orig_mod_id = f"{subfolder}|{pak['name']}"
-            # Try normalized mod_id, then original, then by filename
-            disp_info = cache.get(norm_mod_id) or cache.get(orig_mod_id) or by_filename.get(pak["name"], {})
-            all_rows.append({
-                "id":        orig_mod_id,
-                "real":      pak["name"],
-                "display":   disp_info.get("display", pak["name"]),
-                "group":     disp_info.get("group", ""),
-                "subfolder": pak.get("subfolder"),
-                "active":    pak.get("active", True),
-                "pak_info":  pak,
-            })
+            return re.sub(r'^(DisabledMods[\\/]+)', '', subfolder, flags=re.IGNORECASE)
+        all_rows = rows_from_paks(pak_mods, cache, normalize_cb)
         enabled_rows = [row for row in all_rows if row["active"]]
         disabled_rows = [row for row in all_rows if not row["active"]]
         # Define the color scheme for trees
@@ -1277,6 +1265,15 @@ QTreeView::item:selected {
         self.inactive_pak_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self.inactive_pak_proxy.setFilterKeyColumn(-1)
 
+        # Instead of just setting the model on the view, update the view's internal _model
+        # This ensures the expansion state signals are connected to the right model
+        self.active_pak_view._model = self.active_pak_model
+        self.inactive_pak_view._model = self.inactive_pak_model
+        
+        # Wire up the connections again since we've replaced the models
+        self.active_pak_view._wire_expansion_signals()
+        self.inactive_pak_view._wire_expansion_signals()
+        
         for view, proxy in (
             (self.active_pak_view,   self.active_pak_proxy),
             (self.inactive_pak_view, self.inactive_pak_proxy)):
@@ -1306,7 +1303,7 @@ QTreeView::item:selected {
             print("[DEBUG] No previous doubleClicked connection for active_pak_view to clear.")
         try:
             self.inactive_pak_view.doubleClicked.disconnect()
-            print("[DEBUG] Cleared previous doubleClicked connection for inactive_pak_view.")
+            print("[DEBUG] No previous doubleClicked connection for inactive_pak_view to clear.")
         except Exception:
             print("[DEBUG] No previous doubleClicked connection for inactive_pak_view to clear.")
         self.active_pak_view.doubleClicked.connect(self._deactivate_pak_view_row)
@@ -1323,7 +1320,12 @@ QTreeView::item:selected {
         print("_display_cache keys:", list(cache.keys()))
         print("disabled_rows ids:", [r['id'] for r in disabled_rows][:5])
 
+        self._print_model_relationships("_load_pak_list AFTER refresh_rows")
+        return
+
     def _activate_pak_view_row(self, index):
+        print('[DND] _activate_pak_view_row called')
+        self._print_model_relationships("Before _activate_pak_view_row handling")
         # Activate a PAK from the disabled table
         if not index.isValid():
             return
@@ -1335,6 +1337,7 @@ QTreeView::item:selected {
                 if not child.is_group:
                     activate_pak(self.game_path, child.data["pak_info"])
             self._load_pak_list()
+            self._print_model_relationships("After _activate_pak_view_row -> _load_pak_list")
             return
         pak_info = node.data["pak_info"]
         success = activate_pak(self.game_path, pak_info)
@@ -1345,6 +1348,8 @@ QTreeView::item:selected {
         self._load_pak_list()
 
     def _deactivate_pak_view_row(self, index):
+        print('[DND] _deactivate_pak_view_row called')
+        self._print_model_relationships("Before _deactivate_pak_view_row handling")
         # Deactivate a PAK from the enabled table
         if not index.isValid():
             return
@@ -1355,6 +1360,7 @@ QTreeView::item:selected {
                 if not child.is_group:
                     deactivate_pak(self.game_path, child.data["pak_info"])
             self._load_pak_list()
+            self._print_model_relationships("After _deactivate_pak_view_row -> _load_pak_list")
             return
         pak_info = node.data["pak_info"]
         success = deactivate_pak(self.game_path, pak_info)
@@ -1400,8 +1406,10 @@ QTreeView::item:selected {
         # ---------- build and show context menu ----------
         from PyQt5.QtWidgets import QMenu, QInputDialog, QMessageBox
         context_menu = QMenu(self)
-        rename_action = context_menu.addAction("Rename Display Name…")
-        group_action  = context_menu.addAction("Set Group…")
+        sel_indexes = view.selectionModel().selectedRows()
+        many = len(sel_indexes) > 1
+        rename_action = None if many else context_menu.addAction("Rename Display Name…")
+        group_action  = context_menu.addAction("Set Group…" + (" (bulk)" if many else ""))
         delete_action = context_menu.addAction("Delete PAK Mod")
         action = context_menu.exec_(view.viewport().mapToGlobal(pos))
         # (The remaining logic is unchanged; just replace every
@@ -1439,14 +1447,31 @@ QTreeView::item:selected {
             return
 
         elif action == group_action:
-            from mod_manager.utils import get_display_info, set_display_info
+            from mod_manager.utils import get_display_info, set_display_info, set_display_info_bulk
+            # For bulk, use first selected's group as default
+            if many:
+                first_index = sel_indexes[0]
+                src_index = view.model().mapToSource(first_index) if isinstance(view.model(), QSortFilterProxyModel) else first_index
+                node = src_index.internalPointer()
+                mod_id = node.data["id"]
             current_group = get_display_info(mod_id).get("group", "")
             text, ok = QInputDialog.getText(
                 self, "Set Group", "Group:", text=current_group
             )
             if not ok:
                 return
-            set_display_info(mod_id, group=text.strip())
+            group_val = text.strip()
+            if many:
+                # Set group for all selected using bulk helper
+                changes = []
+                for idx in sel_indexes:
+                    src_index = view.model().mapToSource(idx) if isinstance(view.model(), QSortFilterProxyModel) else idx
+                    node = src_index.internalPointer()
+                    if not getattr(node, "is_group", False):
+                        changes.append((node.data["id"], group_val))
+                set_display_info_bulk(changes)
+            else:
+                set_display_info(mod_id, group=group_val)
             self._load_pak_list()
             return
 
@@ -1680,8 +1705,8 @@ QTreeView::item:selected {
         import os
         if not self.game_path:
             self.ue4ss_status.setText("No game path set.")
-            self.ue4ss_enabled_list.clear()
-            self.ue4ss_disabled_list.clear()
+            self.ue4ss_enabled_view.clear()
+            self.ue4ss_disabled_view.clear()
             return
         ok, version = ue4ss_installed(self.game_path)
         enabled, disabled = read_ue4ss_mods_txt(self.game_path)
@@ -1693,12 +1718,35 @@ QTreeView::item:selected {
         sentinel = "; Built-in keybinds, do not move up!"
         enabled = [mod for mod in enabled if mod not in default_mods and mod != sentinel]
         disabled = [mod for mod in disabled if mod not in default_mods and mod != sentinel]
-        self.ue4ss_enabled_list.clear()
-        self.ue4ss_disabled_list.clear()
-        for mod in sorted(enabled, key=str.lower):
-            self.ue4ss_enabled_list.addItem(mod)
-        for mod in sorted(disabled, key=str.lower):
-            self.ue4ss_disabled_list.addItem(mod)
+        from ui.row_builders import rows_from_ue4ss
+        rows = rows_from_ue4ss(enabled, disabled)
+        enabled_rows = [r for r in rows if r["active"]]
+        disabled_rows = [r for r in rows if not r["active"]]
+        # Style and update tree views to match PAK tab
+        tree_stylesheet = """
+QTreeView {
+    background: #181818;
+    color: #e0e0e0;
+    selection-background-color: #333333;
+    selection-color: #ff9800;
+}
+QHeaderView::section {
+    background-color: #232323;
+    color: #ff9800;
+    font-weight: bold;
+    border: 1px solid #444;
+}
+QTreeView::item:selected {
+    background:#333333;
+    color:#ff9800;
+}
+"""
+        for view in (self.ue4ss_enabled_view, self.ue4ss_disabled_view):
+            view.refresh_rows(enabled_rows if view is self.ue4ss_enabled_view else disabled_rows)
+            view.setHeaderHidden(False)
+            view.setRootIsDecorated(True)
+            view.expandAll()
+            view.setStyleSheet(tree_stylesheet)
         if ok:
             msg = f"UE4SS detected (version: {version}) in\n{get_ue4ss_bin_dir(self.game_path)}"
         else:

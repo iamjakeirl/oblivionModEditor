@@ -271,3 +271,44 @@ def _merge_tree(src_dir: str, dest_dir: str):
             except Exception:
                 # best‑effort copy; ignore single‑file failures
                 pass 
+
+def set_display_info_bulk(changes: list[tuple[str,str]]):
+    """
+    changes = [(mod_id, new_group_str), ...] – display unchanged
+    """
+    data = _display_cache()
+    for mid, grp in changes:
+        entry = data.get(mid, {})
+        entry["group"] = grp
+        data[mid] = entry
+    _save_display(data) 
+
+# ------------------------------------------------------------------
+# ONE‑TIME DISPLAY‑KEY MIGRATION (old "None|" prefix → empty prefix)
+# ------------------------------------------------------------------
+def migrate_display_keys_if_needed():
+    """
+    Run once: rewrite display_names.json keys that start with 'None|'
+    to the modern '|<filename>' form, then set a flag in settings.
+    """
+    s = load_settings()
+    if s.get("display_keys_migrated_v2", False):
+        return
+
+    data      = _display_cache()          # current dict
+    modified  = False
+    for old_key in list(data.keys()):
+        if old_key.startswith("None|"):
+            new_key = "|" + old_key.split("|", 1)[1]
+            if new_key not in data:       # avoid overwrite
+                data[new_key] = data.pop(old_key)
+            else:
+                # conflict → prefer newer key, just drop old
+                data.pop(old_key)
+            modified = True
+
+    if modified:
+        _save_display(data)
+
+    s["display_keys_migrated_v2"] = True
+    save_settings(s) 
