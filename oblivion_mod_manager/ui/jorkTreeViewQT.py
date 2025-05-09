@@ -162,18 +162,18 @@ class ModTreeModel(QAbstractItemModel):
     def dropMimeData(self, data, action, row, col, parent_index):
         if action != Qt.MoveAction or not data.hasFormat(self.MIME):
             return False
+        # Determine which node we are dropping onto / into
         target_node = parent_index.internalPointer() if parent_index.isValid() else None
-        if not target_node:
-            return False
 
-        # Accept drop on group header OR any child within a group
-        if target_node.is_group:
-            group_path = target_node.data
-        else:
-            ancestor = target_node.parent
-            if not ancestor or not ancestor.is_group:
-                return False
-            group_path = ancestor.data
+        # If user drops *between* rows Qt gives parent_index = group header, OK
+        # If they drop *on* a leaf we walk up until we find a group header.
+        while target_node and not getattr(target_node, "is_group", False):
+            target_node = target_node.parent
+
+        if not target_node or not getattr(target_node, "is_group", False):
+            return False  # cannot determine target group – ignore silently
+
+        group_path = target_node.data
         moved_ids = data.data(self.MIME).data().decode().split(",")
         for mid in moved_ids:
             set_display_info(mid, group=group_path)

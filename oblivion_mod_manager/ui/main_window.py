@@ -71,6 +71,8 @@ from ui.jorkTableQT import ModTableModel
 from ui.jorkTreeViewQT import ModTreeModel      # NEW import
 from ui.jorkTreeBrowser import ModTreeBrowser
 from ui.row_builders import rows_from_paks, rows_from_esps
+# Custom proxy for advanced searching
+from ui.jorkTreeBrowser import ModFilterProxy
 
 class PluginsListWidget(QListWidget):
     def __init__(self, *args, **kwargs):
@@ -191,22 +193,34 @@ class MainWindow(QWidget):
         self.esp_layout = QVBoxLayout()
         self.esp_frame.setLayout(self.esp_layout)
 
+        # Toggle row (Show real names)
+        self.chk_real_esp = QCheckBox("Show real names")
+        esp_hdr = QHBoxLayout()
+        esp_hdr.addWidget(self.chk_real_esp)
+        self.esp_layout.addLayout(esp_hdr)
+
+        # Search bar for ESP mods
+        self.esp_search = QLineEdit()
+        self.esp_search.setPlaceholderText("Search mods…")
+        self.esp_layout.addWidget(self.esp_search)
+
         # Disabled mods list (shows commented or not-in-plugins.txt mods)
         self.disabled_mods_label = QLabel("Disabled Mods (double-click to enable):")
         self.disabled_mods_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.disabled_mods_label.setAlignment(Qt.AlignCenter)
         self.esp_layout.addWidget(self.disabled_mods_label)
         from ui.row_builders import rows_from_esps
-        self.esp_disabled_view = ModTreeBrowser([], parent=self)
+        self.esp_disabled_view = ModTreeBrowser([], search_box=self.esp_search,
+                                               show_real_cb=self.chk_real_esp.isChecked, parent=self)
         self.esp_layout.addWidget(self.esp_disabled_view)
 
         # Create a frame to act as the header bar
-        enabled_header = QFrame()
-        enabled_header.setFrameShape(QFrame.StyledPanel)
-        enabled_header.setFrameShadow(QFrame.Plain)
-        enabled_header_layout = QHBoxLayout(enabled_header)
+        self.enabled_header = QFrame()
+        self.enabled_header.setFrameShape(QFrame.StyledPanel)
+        self.enabled_header.setFrameShadow(QFrame.Plain)
+        enabled_header_layout = QHBoxLayout(self.enabled_header)
         enabled_header_layout.setContentsMargins(8, 2, 8, 2)
-        enabled_header.setStyleSheet("""
+        self.enabled_header.setStyleSheet("""
             QFrame {
                 background-color: #232323;
                 border: 1px solid #333;
@@ -219,25 +233,29 @@ class MainWindow(QWidget):
 
         # Create a container for the checkbox with fixed width
         checkbox_container = QWidget()
-        checkbox_container.setFixedWidth(150)  # Increased from 120 to 150
+        checkbox_container.setFixedWidth(360)  # Increased width by 20%
         checkbox_layout = QHBoxLayout(checkbox_container)
-        checkbox_layout.setContentsMargins(0, 0, 0, 0)
+        checkbox_layout.setContentsMargins(0, 0, 5, 0)  # Keep left margin at 0
+        checkbox_layout.setSpacing(25)  # Increased spacing between checkboxes
+        checkbox_layout.setAlignment(Qt.AlignLeft)  # Align contents to the left
         
-        # Checkbox in its container
-        self.hide_stock_checkbox = QCheckBox("Hide stock ESPs")
+        # Checkbox in its container with more minimum width
+        self.hide_stock_checkbox = QCheckBox("Hide Default ESPs")
         self.hide_stock_checkbox.setChecked(True)
         self.hide_stock_checkbox.stateChanged.connect(self.refresh_lists)
-        checkbox_layout.addWidget(self.hide_stock_checkbox, 0, Qt.AlignRight | Qt.AlignVCenter)
+        self.hide_stock_checkbox.setMinimumWidth(140)  # Set minimum width
+        checkbox_layout.addWidget(self.hide_stock_checkbox)
 
-        # Add Load‑Order checkbox
+        # Add Load‑Order checkbox with more minimum width
         self.load_order_mode = QCheckBox("Load‑order mode")
         self.load_order_mode.setChecked(False)
         self.load_order_mode.toggled.connect(self._esp_toggle_layout)
+        self.load_order_mode.setMinimumWidth(140)  # Set minimum width
         checkbox_layout.addWidget(self.load_order_mode)
 
         # Add empty widget with same width as checkbox container for balance
         spacer_widget = QWidget()
-        spacer_widget.setFixedWidth(150)  # Increased from 120 to 150
+        spacer_widget.setFixedWidth(360)  # Match checkbox container width
 
         # Add widgets to main layout
         enabled_header_layout.addWidget(spacer_widget)
@@ -249,17 +267,22 @@ class MainWindow(QWidget):
         self.enabled_mods_label.setFrameStyle(QFrame.NoFrame)
         enabled_header_layout.addWidget(self.enabled_mods_label, 1, Qt.AlignCenter)
 
-        # Add checkbox container
-        enabled_header_layout.addWidget(checkbox_container)
+        # Add checkbox container with explicit alignment
+        enabled_header_layout.addWidget(checkbox_container, 0, Qt.AlignLeft | Qt.AlignVCenter)
 
         # Add the header frame to the main layout
-        self.esp_layout.addWidget(enabled_header)
+        self.esp_layout.addWidget(self.enabled_header)
 
-        self.esp_enabled_view = ModTreeBrowser([], parent=self)
+        self.esp_enabled_view = ModTreeBrowser([], search_box=self.esp_search,
+                                              show_real_cb=self.chk_real_esp.isChecked, parent=self)
         self.esp_layout.addWidget(self.esp_enabled_view)
 
         self.esp_enabled_view.doubleClicked.connect(self._deactivate_esp_row)
         self.esp_disabled_view.doubleClicked.connect(self._activate_esp_row)
+
+        # Update ESP tree labels when "Show real names" toggled
+        self.chk_real_esp.toggled.connect(self.esp_enabled_view._model.layoutChanged.emit)
+        self.chk_real_esp.toggled.connect(self.esp_disabled_view._model.layoutChanged.emit)
 
         # Legacy flat lists for load‑order mode  ↓↓↓
         self.disabled_mods_list = PluginsListWidget()
@@ -296,6 +319,17 @@ QTreeView::item:selected {
             view.setRootIsDecorated(True)
             view.expandAll()
             view.setStyleSheet(tree_stylesheet)
+
+        # Attach delete-callback for ESP ModTreeBrowsers so their context menu can delete files
+        def _delete_esp_rows(rows):
+            for rd in rows:
+                try:
+                    self.delete_esp_file(rd["real"])
+                except Exception as e:
+                    print(f"[ESP-DEL] error: {e}")
+
+        self.esp_enabled_view.set_delete_callback(_delete_esp_rows)
+        self.esp_disabled_view.set_delete_callback(_delete_esp_rows)
 
         # Bottom buttons in a horizontal layout
         self.button_row = QHBoxLayout()
@@ -368,13 +402,25 @@ QTreeView::item:selected {
         self.ue4ss_layout = QVBoxLayout()
         self.ue4ss_frame.setLayout(self.ue4ss_layout)
 
+        # Toggle row (Show real names)
+        self.chk_real_ue4ss = QCheckBox("Show real names")
+        ue_hdr = QHBoxLayout()
+        ue_hdr.addWidget(self.chk_real_ue4ss)
+        self.ue4ss_layout.addLayout(ue_hdr)
+
+        # Search bar for UE4SS mods
+        self.ue4ss_search = QLineEdit()
+        self.ue4ss_search.setPlaceholderText("Search mods…")
+        self.ue4ss_layout.addWidget(self.ue4ss_search)
+
         # Disabled UE4SS mods list (top)
         self.ue4ss_disabled_label = QLabel("Disabled UE4SS Mods (double-click to enable):")
         self.ue4ss_disabled_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.ue4ss_disabled_label.setAlignment(Qt.AlignCenter)
         self.ue4ss_layout.addWidget(self.ue4ss_disabled_label)
         from ui.row_builders import rows_from_ue4ss
-        self.ue4ss_disabled_view = ModTreeBrowser([], parent=self)
+        self.ue4ss_disabled_view = ModTreeBrowser([], search_box=self.ue4ss_search,
+                                                 show_real_cb=self.chk_real_ue4ss.isChecked, parent=self)
         self.ue4ss_layout.addWidget(self.ue4ss_disabled_view)
 
         # Enabled UE4SS mods list (bottom)
@@ -382,8 +428,28 @@ QTreeView::item:selected {
         self.ue4ss_enabled_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.ue4ss_enabled_label.setAlignment(Qt.AlignCenter)
         self.ue4ss_layout.addWidget(self.ue4ss_enabled_label)
-        self.ue4ss_enabled_view = ModTreeBrowser([], parent=self)
+        self.ue4ss_enabled_view = ModTreeBrowser([], search_box=self.ue4ss_search,
+                                                show_real_cb=self.chk_real_ue4ss.isChecked, parent=self)
         self.ue4ss_layout.addWidget(self.ue4ss_enabled_view)
+
+        # Double-click enable/disable for UE4SS mods
+        self.ue4ss_enabled_view.doubleClicked.connect(lambda idx: self._toggle_ue4ss_mod(idx, False))
+        self.ue4ss_disabled_view.doubleClicked.connect(lambda idx: self._toggle_ue4ss_mod(idx, True))
+
+        # Update UE4SS tree labels when "Show real names" toggled
+        self.chk_real_ue4ss.toggled.connect(self.ue4ss_enabled_view._model.layoutChanged.emit)
+        self.chk_real_ue4ss.toggled.connect(self.ue4ss_disabled_view._model.layoutChanged.emit)
+
+        # Attach delete-callback for UE4SS ModTreeBrowsers
+        def _delete_ue4ss_rows(rows):
+            for rd in rows:
+                try:
+                    self._remove_ue4ss_mod(rd["real"])
+                except Exception as e:
+                    print(f"[UE4SS-DEL] error: {e}")
+
+        self.ue4ss_enabled_view.set_delete_callback(_delete_ue4ss_rows)
+        self.ue4ss_disabled_view.set_delete_callback(_delete_ue4ss_rows)
 
         # status label (updated by _refresh_ue4ss_status)
         self.ue4ss_status = QLabel("")
@@ -1140,11 +1206,15 @@ QTreeView::item:selected {
         self.show_status("Game path saved successfully.", 3000, "success")
         self.refresh_lists()
         self._load_pak_list()  # Also refresh the PAK list
+        # Lock the field after saving
+        self.path_input.setReadOnly(True)
 
     def load_settings(self):
         self.game_path = get_game_path()
         if self.game_path:
             self.path_input.setText(self.game_path)
+            # Lock the field to prevent accidental edits (use Browse to change)
+            self.path_input.setReadOnly(True)
 
     def refresh_lists(self):
         # short‑circuit when load‑order mode is active
@@ -1153,7 +1223,14 @@ QTreeView::item:selected {
             return
         from ui.row_builders import rows_from_esps
         esp_files = list_esp_files()
-        mod_esps = [esp for esp in esp_files if esp not in DEFAULT_LOAD_ORDER and esp not in EXCLUDED_ESPS]
+        if self.hide_stock_checkbox.isChecked():
+            # Exclude default ESPs when checkbox is ON
+            mod_esps = [esp for esp in esp_files if esp not in DEFAULT_LOAD_ORDER and esp not in EXCLUDED_ESPS]
+            default_esps = []
+        else:
+            # Include default ESPs (they'll always be treated as enabled)
+            mod_esps = [esp for esp in esp_files if esp not in EXCLUDED_ESPS]
+            default_esps = [esp for esp in esp_files if esp in DEFAULT_LOAD_ORDER]
         plugins_lines = read_plugins_txt()
         enabled_mods = []
         disabled_mods = []
@@ -1169,6 +1246,10 @@ QTreeView::item:selected {
         for esp in mod_esps:
             if esp not in plugins_in_file:
                 disabled_mods.append(esp)
+        # Add default ESPs to enabled list if visible
+        for d in default_esps:
+            if d not in enabled_mods:
+                enabled_mods.insert(0, d)  # keep at top
         # Build rows and refresh tree views
         rows = rows_from_esps(enabled_mods, disabled_mods)
         enabled_rows = [r for r in rows if r["active"]]
@@ -1280,13 +1361,11 @@ QTreeView::item:selected {
             colors=tree_colors
         )
 
-        self.active_pak_proxy = QSortFilterProxyModel(self)
+        self.active_pak_proxy = ModFilterProxy(self)
         self.active_pak_proxy.setSourceModel(self.active_pak_model)
-        self.active_pak_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self.active_pak_proxy.setFilterKeyColumn(-1)
-        self.inactive_pak_proxy = QSortFilterProxyModel(self)
+        self.inactive_pak_proxy = ModFilterProxy(self)
         self.inactive_pak_proxy.setSourceModel(self.inactive_pak_model)
-        self.inactive_pak_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self.inactive_pak_proxy.setFilterKeyColumn(-1)
 
         # Instead of just setting the model on the view, update the view's internal _model
@@ -1334,11 +1413,16 @@ QTreeView::item:selected {
         print("[DEBUG] Connected doubleClicked for active_pak_view.")
         self.inactive_pak_view.doubleClicked.connect(self._activate_pak_view_row)
         print("[DEBUG] Connected doubleClicked for inactive_pak_view.")
-        # Context menus
-        self.active_pak_view.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.active_pak_view.customContextMenuRequested.connect(lambda pos: self._show_pak_view_context_menu(pos, enabled=True))
-        self.inactive_pak_view.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.inactive_pak_view.customContextMenuRequested.connect(lambda pos: self._show_pak_view_context_menu(pos, enabled=False))
+        # Generic ModTreeBrowser already provides context menu; only hook delete callbacks
+        def _delete_pak_rows(rows):
+            for rd in rows:
+                try:
+                    self.delete_pak_mod(rd["pak_info"])
+                except Exception as e:
+                    print(f"[PAK-DEL] error: {e}")
+
+        self.active_pak_view.set_delete_callback(_delete_pak_rows)
+        self.inactive_pak_view.set_delete_callback(_delete_pak_rows)
 
         # DEBUG: Print cache keys and first 5 disabled row ids
         print("_display_cache keys:", list(cache.keys()))
@@ -2070,23 +2154,48 @@ QTreeView::item:selected {
         return (getattr(node, "is_group", False), node)
 
     def _esp_toggle_layout(self, on: bool):
-        # Tree widgets
-        for w in (self.esp_enabled_view, self.esp_disabled_view):
-            w.setVisible(not on)
-        # Flat lists
-        for w in (self.enabled_mods_list, self.disabled_mods_list):
-            w.setVisible(on)
+        # Remove all widgets from esp_layout except the button row
+        widgets = [self.disabled_mods_label, self.esp_disabled_view, self.enabled_header, self.esp_enabled_view,
+                   self.disabled_mods_list, self.enabled_mods_list]
+        for w in widgets:
+            self.esp_layout.removeWidget(w)
+            w.setParent(None)
+        # Re-add in correct order for the mode
         if on:
+            # Load order mode: header, list, header, list
+            self.esp_layout.insertWidget(0, self.disabled_mods_label)
+            self.esp_layout.insertWidget(1, self.disabled_mods_list)
+            self.esp_layout.insertWidget(2, self.enabled_header)
+            self.esp_layout.insertWidget(3, self.enabled_mods_list)
+            self.disabled_mods_list.show()
+            self.enabled_mods_list.show()
+            self.esp_disabled_view.hide()
+            self.esp_enabled_view.hide()
             self._populate_flat_lists()
         else:
+            # Tree mode: header, tree, header, tree
+            self.esp_layout.insertWidget(0, self.disabled_mods_label)
+            self.esp_layout.insertWidget(1, self.esp_disabled_view)
+            self.esp_layout.insertWidget(2, self.enabled_header)
+            self.esp_layout.insertWidget(3, self.esp_enabled_view)
+            self.disabled_mods_list.hide()
+            self.enabled_mods_list.hide()
+            self.esp_disabled_view.show()
+            self.esp_enabled_view.show()
             self.refresh_lists()
 
     def _populate_flat_lists(self):
         """Fill legacy QListWidgets from current plugins.txt + disk scan."""
         enabled, disabled = [], []
         esp_files = list_esp_files()
-        mod_esps  = [e for e in esp_files
-                     if e not in DEFAULT_LOAD_ORDER and e not in EXCLUDED_ESPS]
+        if self.hide_stock_checkbox.isChecked():
+            # Exclude default ESPs when checkbox is ON
+            mod_esps = [esp for esp in esp_files if esp not in DEFAULT_LOAD_ORDER and esp not in EXCLUDED_ESPS]
+            default_esps = []
+        else:
+            # Include default ESPs (they'll always be treated as enabled)
+            mod_esps = [esp for esp in esp_files if esp not in EXCLUDED_ESPS]
+            default_esps = [esp for esp in esp_files if esp in DEFAULT_LOAD_ORDER]
         for line in read_plugins_txt():
             name = line.lstrip('#').strip()
             if name in mod_esps:

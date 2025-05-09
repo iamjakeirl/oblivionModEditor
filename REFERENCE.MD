@@ -28,7 +28,7 @@ key	type	notes
 id	str	Primary key. Format: `"<subfolder>
 real	str	Actual filename (e.g. CoolMod.pak).
 display	str	User-visible name (falls back to real).
-group	str	Hierarchical group path Parent/Child. Empty ⇒ “Ungrouped”.
+group	str	Hierarchical group path Parent/Child. Empty ⇒ "Ungrouped".
 subfolder	str|None	Subdir inside ~mods or LogicMods etc.
 active	bool	Enabled in game (True) vs disabled (False).
 pak_info / esp_info / ue4ss_info	dict	Raw backend object (type-specific).
@@ -57,7 +57,7 @@ pak_info / esp_info / ue4ss_info	dict	Raw backend object (type-specific).
 3. Principal back-end APIs
 Module / func	Purpose	Typical caller
 pak_manager.add_pak(game_path, src_pak, subfolder)	Copy .pak + .ucas + .utoc bundle into ~mods/ (or nested subfolder) and register in pak_mods.json.	Archive import in MainWindow._install_extracted_mod
-pak_manager.remove_pak(game_path, pak_name)	Hard-delete bundle + registry.	GUI “Delete” context action
+pak_manager.remove_pak(game_path, pak_name)	Hard-delete bundle + registry.	GUI "Delete" context action
 pak_manager.activate_pak / deactivate_pak	Move files between ~mods and sibling DisabledMods directory.	Double-click rows
 pak_manager.reconcile_pak_list(game_path)	Rescan disk → keep registry in sync (adds stray files, drops missing).	PAK-tab refresh
 registry.read_plugins_txt / write_plugins_txt	Read/write plugins.txt; retains comment prefix # for disabled ESPs.	ESP-tab enable/disable
@@ -85,7 +85,14 @@ All PAK/ESP/UI operations eventually emit self._load_pak_list() or self.refresh_
 
         Drag-n-drop re-groups mods by writing display_names.json.
 
-        Keeps expansion state across model resets.
+        Keeps expansion state across model resets (active for PAK, ESP & UE4SS).
+
+        Built-in context-menu (leaf + group) with:
+            • Rename Display Name
+            • Set Group (bulk or single)
+            • Delete (calls tab-specific callback)
+
+        Tabs inject a delete_callback so the same browser can manage PAK / ESP / UE4SS without duplicating code.
 
 5. Extension points
 Goal	Where / How
@@ -126,7 +133,7 @@ Disabled UE4SS installs are parked in %APPDATA%/OblivionModManager/data/disabled
 Symptom	Suspect / fix
 Tree view loses expansion	Ensure ModTreeBrowser._wire_expansion_signals() is called after swapping models.
 Index mismatch warnings	Usually stale Qt indexes – detach old model: view.setModel(None) before building a fresh proxy.
-PAK missing in list	Call reconcile_pak_list(game_path) then refresh; verify .pak isn’t in DEFAULT_PAK_FILES.
+PAK missing in list	Call reconcile_pak_list(game_path) then refresh; verify .pak isn't in DEFAULT_PAK_FILES.
 UE4SS mods ignored	Confirm ue4ss_installed() returns (True, …) and that mods.txt contains mod_folder : 1.
 9. Style & coding rules for agents
 
@@ -139,3 +146,15 @@ UE4SS mods ignored	Confirm ue4ss_installed() returns (True, …) and that mods.t
     New backend modules should not import from UI.
 
     Unit of state = settings.json + pak_mods.json; keep them consistent.
+
+ESP tab now maintains header-window-header-window order in both tree and load order modes, matching the PAK and UE4SS tabs.
+
+Search boxes added to ESP & UE4SS tabs (same as PAK). Custom search semantics:
+            • Default: searches leaf mod display/real names.
+            • Prefix with # to search group headers.
+
+Path field becomes read-only once a valid game path is saved; use Browse to change.
+
+"Show real names" toggle added to ESP & UE4SS tabs (like PAK); updates on the fly.
+
+Advanced search (leaf names default, #group) now active across PAK, ESP & UE4SS.
