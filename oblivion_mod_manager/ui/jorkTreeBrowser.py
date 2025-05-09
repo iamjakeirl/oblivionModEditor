@@ -23,6 +23,31 @@ class ModTreeBrowser(QTreeView):
         # Improve drag-drop visual feedback
         self.setStyleSheet(self.styleSheet() + "\nQTreeView::dropIndicator { border: 2px solid #ff9800; }")
 
+        # Apply default dark-theme stylesheet immediately so the header retains
+        # the correct colors even before the parent widget later re-applies a
+        # per-tab stylesheet. This prevents the fallback to Qt's white header
+        # that some users noticed after recent refactors.
+        self.setStyleSheet(
+            """
+QTreeView {
+    background: #181818;
+    color: #e0e0e0;
+    selection-background-color: #333333;
+    selection-color: #ff9800;
+}
+QHeaderView::section {
+    background-color: #232323;
+    color: #ff9800;
+    font-weight: bold;
+    border: 1px solid #444;
+}
+QTreeView::item:selected {
+    background:#333333;
+    color:#ff9800;
+}
+            """
+        )
+
         # Optional callbacks (can be injected later via setter)
         self._delete_callback = delete_callback  # fn(list[row_dict]) -> None
 
@@ -334,6 +359,16 @@ class ModTreeBrowser(QTreeView):
                 yield from self._iter_leaves_in_group(child)
             else:
                 yield child 
+
+    def clear(self):
+        """Compatibility helper – mimic QTreeWidget.clear() for QTreeView-based browser.
+
+        Some call-sites (e.g. MainWindow._refresh_ue4ss_status) were written for a
+        widget that exposed a .clear() method. Implement the same API here by
+        simply resetting the view to an empty data set so we avoid run-time
+        AttributeError without duplicating logic elsewhere.
+        """
+        self.refresh_rows([])
 
 # ---------------- Custom proxy with leaf/group filtering ----------------
 

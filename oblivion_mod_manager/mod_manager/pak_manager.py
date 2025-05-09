@@ -15,16 +15,40 @@ DISABLED_FOLDER_NAME = "DisabledMods"
 
 def _find_pak_path_suffix(base_path, target_suffix):
     """
-    Recursively search for a directory whose absolute path ends with target_suffix.
-    This allows the mod manager to work with different install layouts (Steam, Xbox, etc.).
-    Returns the first match found, or None if not found.
+    Recursively search for directories whose absolute path ends with *target_suffix* and
+    choose the one *closest to the supplied base_path*.
+
+    Rationale: Some game distributions embed additional copies of the Unreal
+    **CrashReportClient** application that also contain a *Content/Paks* folder.
+    Because ``os.walk`` traverses the tree alphabetically, the first match may be
+    this **incorrect** sub-path (e.g. ``…/Engine/Programs/CrashReportClient/...``),
+    leading us to create a *~mods* directory in the wrong location.
+
+    By collecting **all** matches and selecting the path with the *shortest* relative
+    depth (fewest path components between *base_path* and the candidate), we prefer
+    the top-level *OblivionRemastered/Content/Paks/~mods* folder that users expect.
     """
     if not os.path.isdir(base_path):
         return None
+
+    matches = []
     for root, dirs, files in os.walk(base_path):
         if root.endswith(target_suffix):
-            return root
-    return None
+            matches.append(root)
+
+    if not matches:
+        return None
+
+    # Pick candidate with the shallowest depth relative to base_path
+    base = Path(base_path)
+    def rel_depth(p):
+        try:
+            return len(Path(p).relative_to(base).parts)
+        except ValueError:
+            # Should not happen, but fallback to length of split path
+            return len(Path(p).parts)
+
+    return min(matches, key=rel_depth)
 
 # The primary file extension for PAK mods
 PAK_EXTENSION = '.pak'
@@ -695,16 +719,43 @@ def create_subfolder(game_path, subfolder_name):
 
 def get_paks_root_dir(game_path):
     """
-    Search for a directory named 'Paks' under the game path and return its absolute path.
-    Returns None if not found.
+    Locate the *Content/Paks* directory that belongs to the main game build.
+
+    Priority order:
+    1. Path ending with "OblivionRemastered\Content\Paks"
+    2. Shallowest "Content\Paks" path relative to game_path
+    
+    The game install may include auxiliary *Paks* folders (for tools such as the
+    CrashReportClient). This detection strategy ensures we find the correct path.
     """
     if not game_path or not os.path.isdir(game_path):
         return None
+
+    candidates = []
     for root, dirs, files in os.walk(game_path):
         for d in dirs:
             if d.lower() == "paks":
-                return os.path.join(root, d)
-    return None
+                full_path = os.path.join(root, d)
+                candidates.append(full_path)
+                
+                # Check if this is the preferred Oblivion path
+                norm_path = os.path.normpath(full_path).lower()
+                if norm_path.endswith(os.path.normpath("OblivionRemastered\\Content\\Paks").lower()):
+                    # Return immediately if we find the ideal path
+                    return full_path
+
+    if not candidates:
+        return None
+
+    # Fall back to shallowest path if no exact match was found
+    base = Path(game_path)
+    def rel_depth(p):
+        try:
+            return len(Path(p).relative_to(base).parts)
+        except ValueError:
+            return len(Path(p).parts)
+
+    return min(candidates, key=rel_depth)
 
 def ensure_paks_structure(game_path):
     """
