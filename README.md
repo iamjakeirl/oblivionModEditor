@@ -4,38 +4,58 @@ A streamlined tool for managing ESP plugins, PAK mods, and UE4SS script mods for
 
 ## Features
 
-- **ESP Management**: Enable, disable, and reorder ESP plugin files
-- **PAK Management**: Activate, deactivate, and organize PAK mods
-- **Drag-and-Drop Support**: Easily install mods by dragging ZIP, or 7zip. Drag and drop loose mods if they come in a RAR after extracting yourself.
+- **ESP Management**: Enable, disable, and reorder ESP plugin files with drag-and-drop
+- **PAK Management**: Activate, deactivate, and organize PAK mods, including subfolder grouping
+- **UE4SS Script Mod Support**: Manage UE4SS mods and install/uninstall UE4SS itself
+- **Advanced Search**: Instantly filter mods by name; prefix with `#` to search group headers
+- **Display Name & Group Editing**: Rename mods and organize them into custom groups (supports nested groups)
+- **Persistent Grouping**: Drag-and-drop to regroup mods; changes are saved automatically
+- **Context Menus**: Right-click mods or groups for quick actions (rename, set group, delete, etc.)
+- **Show Real Names Toggle**: Instantly switch between display and real file names in all tabs
+- **Drag-and-Drop Install**: Drop ZIP or 7z archives directly onto the window to auto-extract and install mods (RAR supported after manual extraction)
 - **Dark Mode UI**: Modern, sleek interface for comfortable use
+- **Safe State Management**: All changes are tracked and can be reverted; settings and mod lists are auto-saved
 
 ## Quick Start
 
 1. Launch the application
 2. Set your Oblivion Remastered game path (e.g., `D:\Games\The Elder Scrolls IV- Oblivion Remastered`)
-3. Manage your mods using the tabs for ESP and PAK files
+3. Use the ESP, PAK, and UE4SS tabs to manage your mods
 
 ## ESP Mod Features
 
 - Double-click to enable/disable mods
 - Drag to reorder enabled mods (load order)
-- Hide stock ESPs for cleaner view
-- Right-click for additional options (delete, move to disabled folder)
+- Hide stock ESPs for a cleaner view
+- Right-click for options: rename, set group, delete, move to disabled
 - Revert to default load order with one click
+- Search by mod name or group (prefix with `#`)
+- Toggle between display and real file names
 
 ## PAK Mod Features
 
 - Double-click to activate/deactivate PAK files
-- Organize PAKs into subfolders for better organization
-- Right-click for additional options
+- Organize PAKs into subfolders and custom groups
+- Right-click for options: rename, set group, delete
 - Add PAKs with automatic related file detection
+- Search by mod name or group (prefix with `#`)
+- Toggle between display and real file names
 
-## Installation Tips
+## UE4SS Mod Features
+
+- Install or uninstall UE4SS with one click
+- Manage UE4SS script mods just like PAKs and ESPs
+- Enable/disable mods, organize into groups, and search
+- Toggle between display and real file names
+
+## Installation & Usage Tips
 
 - Always set your game path before installing mods
-- Drag mod archives directly onto the application window for easy installation
-- Use the refresh buttons if you make changes outside the manager
+- Drag mod archives (ZIP/7z) directly onto the app window for easy install
+- For RAR files, extract manually and drag the folder in
+- Use the refresh button if you make changes outside the manager
 - Backup your data before making major changes
+- All settings and mod lists are stored in `%APPDATA%/OblivionModManager/data/`
 
 ## Requirements
 
@@ -46,4 +66,4 @@ A streamlined tool for managing ESP plugins, PAK mods, and UE4SS script mods for
 
 Created by jorkXL
 
-https://github.com/iamjakeirl/oblivionModEditor/releases/tag/1.3 - download in releases. You only need the exe
+https://github.com/iamjakeirl/oblivionModEditor/releases/tag/1.3 – download in releases. You only need the exe
