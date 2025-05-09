@@ -66,4 +66,4 @@ A streamlined tool for managing ESP plugins, PAK mods, and UE4SS script mods for
 
 Created by jorkXL
 
-https://github.com/iamjakeirl/oblivionModEditor/releases/tag/1.3 – download in releases. You only need the exe
+(https://github.com/iamjakeirl/oblivionModEditor/releases/tag/v2.1)– download in releases. You only need the exe
