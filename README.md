@@ -14,7 +14,7 @@ A streamlined tool for managing ESP plugins, PAK mods, and UE4SS script mods for
 - **Show Real Names Toggle**: Instantly switch between display and real file names in all tabs
 - **Drag-and-Drop Install**: Drop ZIP or 7z archives directly onto the window to auto-extract and install mods (RAR supported after manual extraction)
 - **Dark Mode UI**: Modern, sleek interface for comfortable use
-- **Safe State Management**: All changes are tracked and can be reverted; settings and mod lists are auto-saved
+
 
 ## Quick Start
 
