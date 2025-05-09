@@ -949,12 +949,47 @@ QTreeView::item:selected {
         
         # --- Detect UE4SS-style folders ---
         ue4ss_mod_folders = []
+        shared_mod_folders = []  # special resource folder
+
+        # First, look for the UE4SS/mods/shared structure
+        ue4ss_path = Path(extract_dir) / "ue4ss" / "mods" / "shared"
+        if ue4ss_path.exists():
+            # Found a direct UE4SS/mods/shared structure, add to special case
+            shared_mod_folders.append(ue4ss_path)
+            print(f"[UE4SS] Found direct shared folder: {ue4ss_path}")
+
+        # Then look for standard mods and any other shared resources
         for root, dirs, files in os.walk(extract_dir):
-            if any(f.lower().endswith(".lua") for f in files) and \
-               os.path.basename(root).lower() == "scripts":
+            root_path = Path(root)
+            
+            # Skip if we already found this directly
+            if root_path == ue4ss_path:
+                continue
+                
+            # Detect any Lua files
+            has_lua = any(f.lower().endswith(".lua") for f in files)
+            if not has_lua:
+                continue
+                
+            # Check for a shared folder structure anywhere in the path
+            if "shared" in root_path.parts:
+                for i, part in enumerate(root_path.parts):
+                    if part.lower() == "shared":
+                        # Found shared folder, get its parent directory
+                        shared_parent = Path(*root_path.parts[:i+1])
+                        shared_mod_folders.append(shared_parent)
+                        print(f"[UE4SS] Found shared folder in path: {shared_parent}")
+                        break
+            # Standard UE4SS mod detection (scripts folder)
+            elif os.path.basename(root).lower() == "scripts":
                 mod_root = Path(root).parent  # FolderX
                 ue4ss_mod_folders.append(mod_root)
+                print(f"[UE4SS] Found standard mod: {mod_root}")
+                
         ue4ss_mod_folders = list({p for p in ue4ss_mod_folders})  # dedupe
+        shared_mod_folders = list({p for p in shared_mod_folders})
+        
+        print(f"[UE4SS] Detected {len(ue4ss_mod_folders)} regular mods and {len(shared_mod_folders)} shared resource folders")
         # --- End UE4SS detection ---
         
         # Process ESP files
@@ -1029,6 +1064,16 @@ QTreeView::item:selected {
                     if add_ue4ss_mod(self.game_path, mod_dir):
                         installed_ue4ss += 1
                 self._refresh_ue4ss_status()  # Refresh UE4SS tab after installing mods
+        # --- Merge any shared resource folders ---
+        installed_shared = 0  # Count installed shared resources
+        if shared_mod_folders:
+            from mod_manager.ue4ss_installer import get_ue4ss_mods_dir
+            shared_dest_root = get_ue4ss_mods_dir(self.game_path)
+            if shared_dest_root:
+                shared_dest = shared_dest_root / "shared"
+                for sdir in shared_mod_folders:
+                    _merge_tree(sdir, shared_dest)
+                    installed_shared += 1
         # --- End UE4SS mod install ---
         
         # Enable all installed ESPs by adding them to the end of plugins.txt
@@ -1041,9 +1086,22 @@ QTreeView::item:selected {
                 plugins.append(esp_name)
             write_plugins_txt(plugins)
         
-        # Show summary in status bar instead of a popup
-        summary = (f"Installed {installed_esp} ESP, {installed_pak} PAK, "
-                   f"{installed_ue4ss} UE4SS mod(s) from {mod_name}.")
+        # Build summary message with all installed components
+        summary_parts = []
+        if installed_esp > 0:
+            summary_parts.append(f"{installed_esp} ESP")
+        if installed_pak > 0:
+            summary_parts.append(f"{installed_pak} PAK")
+        if installed_ue4ss > 0:
+            summary_parts.append(f"{installed_ue4ss} UE4SS mod(s)")
+        if installed_shared > 0:
+            summary_parts.append(f"{installed_shared} UE4SS shared resource(s)")
+            
+        if not summary_parts:
+            summary = f"No installable content found in {mod_name}."
+        else:
+            summary = f"Installed {', '.join(summary_parts)} from {mod_name}."
+            
         self.show_status(summary, 8000, "success")
         
         # Refresh the lists to show the newly enabled ESPs
@@ -1824,7 +1882,7 @@ QTreeView::item:selected {
         # Filter out default/sentinel mods
         default_mods = {
             "CheatManagerEnablerMod", "ConsoleCommandsMod", "ConsoleEnablerMod",
-            "SplitScreenMod", "LineTraceMod", "BPML_GenericFunctions", "BPModLoaderMod", "Keybinds"
+            "SplitScreenMod", "LineTraceMod", "BPML_GenericFunctions", "BPModLoaderMod", "Keybinds", "shared"
         }
         sentinel = "; Built-in keybinds, do not move up!"
         enabled = [mod for mod in enabled if mod not in default_mods and mod != sentinel]

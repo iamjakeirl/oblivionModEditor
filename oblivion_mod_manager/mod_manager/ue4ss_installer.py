@@ -7,6 +7,10 @@ import re
 
 DEBUG = False
 
+# Reserved UE4SS mod-folder names that should never appear in the manager
+# nor be listed in mods.txt
+RESERVED_MODS = {"shared"}
+
 BIN_MAP = {
     "steam":  r"OblivionRemastered\Binaries\Win64",
     "gamepass": r"OblivionRemastered\Binaries\WinGDK",
@@ -146,13 +150,27 @@ def get_ue4ss_mods_dir(game_root):
     mods_dir.mkdir(parents=True, exist_ok=True)
     return mods_dir
 
-def read_ue4ss_mods_txt(game_root):
-    """Return (enabled_mods, disabled_mods) from mods.txt as two lists of mod folder names."""
+def read_ue4ss_mods_txt(game_root: str, *, normalize: bool = True):
+    """Return (enabled_mods, disabled_mods) after *optionally* normalising legacy enabled.txt mods.
+
+    Normalisation rules:
+        • Any folder inside UE4SS/Mods that is NOT referenced in mods.txt is treated as:
+              – enabled if an `enabled.txt` file exists inside it
+              – disabled otherwise
+        • A corresponding entry is then written to mods.txt (and enabled.txt removed) so
+          future reads rely solely on mods.txt.
+    """
     bin_dir = get_ue4ss_bin_dir(game_root)
     if not bin_dir:
         return [], []
-    mods_file = bin_dir / "UE4SS" / "Mods" / "mods.txt"
-    enabled, disabled = [], []
+
+    mods_root = bin_dir / "UE4SS" / "Mods"
+    mods_file = mods_root / "mods.txt"
+
+    enabled: list[str] = []
+    disabled: list[str] = []
+
+    # Parse existing mods.txt (if any)
     if mods_file.exists():
         for line in mods_file.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -160,13 +178,53 @@ def read_ue4ss_mods_txt(game_root):
                 continue
             if ":" in line:
                 name, val = [x.strip() for x in line.split(":", 1)]
-                if val == "1":
-                    enabled.append(name)
-                else:
-                    disabled.append(name)
             else:
-                # fallback: treat as enabled
-                enabled.append(line)
+                name, val = line, "1"  # default enabled if no colon
+
+            # Skip reserved system folders (e.g. shared)
+            if name.lower() in RESERVED_MODS:
+                continue
+
+            if val == "1":
+                enabled.append(name)
+            else:
+                disabled.append(name)
+
+    # --- Legacy enabled.txt scan -------------------------------------------------
+    if normalize:
+        from pathlib import Path
+
+        listed = set(enabled) | set(disabled)
+
+        if mods_root.exists():
+            for child in mods_root.iterdir():
+                if not child.is_dir():
+                    continue
+                mod_name = child.name
+
+                if mod_name in listed:
+                    continue  # already accounted for
+
+                enabled_flag = (child / "enabled.txt").exists()
+
+                # Record state
+                if enabled_flag:
+                    enabled.append(mod_name)
+                else:
+                    disabled.append(mod_name)
+
+                # Normalise: add to mods.txt and rename enabled.txt → managed.txt
+                _update_mods_txt(mods_root, mod_name, enabled=enabled_flag)
+
+                # Rename legacy flag file so we don't create/delete it again
+                if (child / "enabled.txt").exists():
+                    try:
+                        (child / "enabled.txt").replace(child / "managed.txt")
+                    except Exception:
+                        (child / "enabled.txt").unlink(missing_ok=True)
+
+    # ---------------------------------------------------------------------------
+
     return enabled, disabled
 
 def set_ue4ss_mod_enabled(game_root, mod_folder_name, enabled=True):
@@ -189,20 +247,39 @@ def set_ue4ss_mod_enabled(game_root, mod_folder_name, enabled=True):
     mods_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return True
 
-def _update_mods_txt(bin_dir: Path, mod_folder_name: str):
-    """Insert mod_folder_name : 1 into mods.txt above the keybind sentinel line."""
+def _update_mods_txt(bin_dir: Path, mod_folder_name: str, *, enabled: bool = True):
+    """Ensure mods.txt contains a line `mod_folder_name : 1|0` above sentinel (or at end).
+
+    If the entry already exists it is replaced. `enabled` controls the value written.
+    """
+    # Never write entries for reserved folders (e.g. shared)
+    if mod_folder_name.lower() in RESERVED_MODS:
+        return
+
     mods_file = bin_dir / "mods.txt"
     sentinel = "; Built-in keybinds, do not move up!"
-    lines = []
-    if mods_file.exists():
-        lines = mods_file.read_text(encoding="utf-8").splitlines()
-    # Remove any existing entry for this mod
-    lines = [l for l in lines if not l.strip().startswith(mod_folder_name)]
+
+    # Ensure the file exists so we can read/patch it
+    if not mods_file.exists():
+        mods_file.write_text(f"{sentinel}\n", encoding="utf-8")
+
+    lines = mods_file.read_text(encoding="utf-8").splitlines()
+
+    # Strip any previous occurrence of this mod
+    lines = [l for l in lines if not l.strip().startswith(f"{mod_folder_name} :")]
+
+    # Guarantee sentinel line exists
+    if sentinel not in lines:
+        lines.append(sentinel)
+
+    # Insert just above sentinel so UE4SS retains order assumptions
     try:
         idx = lines.index(sentinel)
     except ValueError:
         idx = len(lines)
-    lines.insert(idx, f"{mod_folder_name} : 1")
+
+    lines.insert(idx, f"{mod_folder_name} : {'1' if enabled else '0'}")
+
     mods_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 def add_ue4ss_mod(game_root: str, src_mod_dir: Path):
@@ -215,16 +292,26 @@ def add_ue4ss_mod(game_root: str, src_mod_dir: Path):
         return False
     ue4ss_mods_dir = bin_dir / "UE4SS" / "Mods"
     ue4ss_mods_dir.mkdir(parents=True, exist_ok=True)
+    mod_name_lower = src_mod_dir.name.lower()
+
+    # -------- SPECIAL-CASE: shared system folder --------
+    if mod_name_lower in RESERVED_MODS:
+        _merge_tree(src_mod_dir, ue4ss_mods_dir / src_mod_dir.name)
+        return True  # merged successfully, no mods.txt entry
+
     dest = ue4ss_mods_dir / src_mod_dir.name
     if dest.exists():
         shutil.rmtree(dest)
     shutil.copytree(src_mod_dir, dest)
-    # Remove enabled.txt if present
+    # If the mod ships an enabled.txt flag, rename it so future scripts know it's been managed
     enabled_txt = dest / "enabled.txt"
     if enabled_txt.exists():
-        enabled_txt.unlink()
+        try:
+            enabled_txt.replace(dest / "managed.txt")
+        except Exception:
+            enabled_txt.unlink(missing_ok=True)
     mods_txt_dir = bin_dir / "UE4SS" / "Mods"
-    _update_mods_txt(mods_txt_dir, src_mod_dir.name)
+    _update_mods_txt(mods_txt_dir, src_mod_dir.name, enabled=True)
     return True
 
 def ensure_ue4ss_configs(game_root):
@@ -307,4 +394,23 @@ def _patch_mods_json(mods_json_path):
         if name not in existing_names:
             data.append({"mod_name": name, "mod_enabled": False})
     with open(mods_json_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4) 
+        json.dump(data, f, indent=4)
+
+# ---------------- internal helpers --------------------
+
+def _merge_tree(src: Path, dest: Path):
+    """Recursively merge *src* directory into *dest* (overwriting duplicates)."""
+    if not src.exists():
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        d = dest / item.name
+        if item.is_dir():
+            _merge_tree(item, d)
+        else:
+            try:
+                if d.exists():
+                    d.unlink()
+                shutil.copy2(item, d)
+            except Exception:
+                pass 
