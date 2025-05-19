@@ -26,7 +26,7 @@ A streamlined tool for managing ESP plugins, PAK mods, MagicLoader mods, and UE4
 
 - Double-click to enable/disable mods
 - Drag to reorder enabled mods (load order)
-- Hide stock ESPs for a cleaner view
+- Hide default ESPs for a cleaner view
 - Right-click for options: rename, set group, delete, move to disabled
 - Revert to default load order with one click
 - Search by mod name or group (prefix with `#`)
