@@ -11,7 +11,9 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QTableView, QTreeView
 )
 from PyQt5.QtCore import Qt, QEvent, QItemSelectionModel, QUrl, QMimeData, QTimer, QByteArray, QSortFilterProxyModel
-from PyQt5.QtGui import QDrag, QPixmap, QColor, QFont, QDragEnterEvent, QDropEvent
+from PyQt5.QtGui import (
+    QDrag, QPixmap, QColor, QFont, QDragEnterEvent, QDropEvent, QDesktopServices
+)
 from mod_manager.utils import (
     migrate_display_keys_if_needed,               #  ← NEW
     get_game_path, SETTINGS_PATH, get_esp_folder, DATA_DIR, open_folder_in_explorer,
@@ -19,6 +21,7 @@ from mod_manager.utils import (
     get_custom_mod_dir_name, _merge_tree, get_display_info, _display_cache,
     set_display_info, set_display_info_bulk
 )
+from mod_manager.utils import get_install_type     # ensure we can detect Steam/GamePass
 from mod_manager.registry import list_esp_files, read_plugins_txt, write_plugins_txt
 from mod_manager.pak_manager import (
     list_managed_paks, add_pak, remove_pak, scan_for_installed_paks, 
@@ -35,6 +38,7 @@ import py7zr
 import rarfile
 from pyunpack import Archive
 import filecmp
+import subprocess  # ← will launch MagicLoader.exe
 
 # Note: rarfile library requires unrar executable to be installed on the system or in PATH
 # If not available, we'll fall back to pyunpack which uses whatever extractor is available
@@ -73,6 +77,13 @@ from ui.jorkTreeBrowser import ModTreeBrowser
 from ui.row_builders import rows_from_paks, rows_from_esps
 # Custom proxy for advanced searching
 from ui.jorkTreeBrowser import ModFilterProxy
+# NEW: MagicLoader helpers
+from mod_manager.magicloader_installer import (
+    magicloader_installed, install_magicloader, uninstall_magicloader,
+    reenable_magicloader, get_ml_mods_dir, list_ml_json_mods,
+    deactivate_ml_mod, activate_ml_mod, get_magicloader_dir, _target_ml_dir
+)
+from ui.row_builders import rows_from_magic
 
 class PluginsListWidget(QListWidget):
     def __init__(self, *args, **kwargs):
@@ -397,6 +408,91 @@ QTreeView::item:selected {
         # Add PAK tab to notebook
         self.notebook.addTab(self.pak_frame, "PAK Mods")
 
+        # ---------- INSERT NEW MAGICLOADER TAB just below UE4SS tab ---------------
+        self.magic_frame = QWidget()
+        self.magic_layout = QVBoxLayout(self.magic_frame)
+
+        self.chk_real_magic = QCheckBox("Show real names")
+        self.magic_layout.addWidget(self.chk_real_magic)
+
+        self.magic_search = QLineEdit()
+        self.magic_search.setPlaceholderText("Search mods…")
+        self.magic_layout.addWidget(self.magic_search)
+
+        self.magic_disabled_label = QLabel("Disabled JSON Mods (double‑click to enable):")
+        self.magic_disabled_label.setStyleSheet("font-weight:bold; color:#ff9800;")
+        self.magic_disabled_label.setAlignment(Qt.AlignCenter)
+        self.magic_layout.addWidget(self.magic_disabled_label)
+
+        self.magic_disabled_view = ModTreeBrowser([], search_box=self.magic_search,
+                                                  show_real_cb=self.chk_real_magic.isChecked, parent=self)
+        self.magic_layout.addWidget(self.magic_disabled_view)
+
+        self.magic_enabled_label = QLabel("Enabled JSON Mods (double‑click to disable):")
+        self.magic_enabled_label.setStyleSheet("font-weight:bold; color:#ff9800;")
+        self.magic_enabled_label.setAlignment(Qt.AlignCenter)
+        self.magic_layout.addWidget(self.magic_enabled_label)
+
+        self.magic_enabled_view = ModTreeBrowser([], search_box=self.magic_search,
+                                                 show_real_cb=self.chk_real_magic.isChecked, parent=self)
+        self.magic_layout.addWidget(self.magic_enabled_view)
+
+        self.magic_enabled_view.doubleClicked.connect(lambda idx: self._toggle_magic_mod(idx, False))
+        self.magic_disabled_view.doubleClicked.connect(lambda idx: self._toggle_magic_mod(idx, True))
+
+        self.chk_real_magic.toggled.connect(self.magic_enabled_view._model.layoutChanged.emit)
+        self.chk_real_magic.toggled.connect(self.magic_disabled_view._model.layoutChanged.emit)
+
+        # Apply consistent tree styling as in PAK tab
+        tree_stylesheet = """
+QTreeView {
+    background: #181818;
+    color: #e0e0e0;
+    selection-background-color: #333333;
+    selection-color: #ff9800;
+}
+QHeaderView::section {
+    background-color: #232323;
+    color: #ff9800;
+    font-weight: bold;
+    border: 1px solid #444;
+}
+QTreeView::item:selected {
+    background:#333333;
+    color:#ff9800;
+}
+"""
+        for view in (self.magic_enabled_view, self.magic_disabled_view):
+            view.setHeaderHidden(False)
+            view.setRootIsDecorated(True) 
+            view.expandAll()
+            view.setStyleSheet(tree_stylesheet)
+
+        # status + buttons
+        self.magic_status = QLabel("")
+        self.magic_status.setAlignment(Qt.AlignCenter)
+        self.magic_status.setStyleSheet("font-weight:bold; color:#ff9800;")
+        self.magic_layout.addWidget(self.magic_status)
+
+        btn_row = QHBoxLayout()
+        self.magic_action_btn = QPushButton()
+        self.magic_action_btn.clicked.connect(self._on_magic_action)
+        btn_row.addWidget(self.magic_action_btn)
+
+        # --- Run button replaces old Enable/Disable ---
+        self.magic_run_btn = QPushButton("Run MagicLoader")
+        self.magic_run_btn.clicked.connect(self._launch_magicloader)
+        btn_row.addWidget(self.magic_run_btn)
+
+        self.magic_refresh_btn = QPushButton("Refresh")
+        self.magic_refresh_btn.clicked.connect(self._refresh_magic_status)
+        btn_row.addWidget(self.magic_refresh_btn)
+
+        self.magic_layout.addLayout(btn_row)
+
+        self.notebook.addTab(self.magic_frame, "MagicLoader")
+# --------------------------------------------------------------------------
+
         # --- UE4SS TAB ----------------------------------------------------
         self.ue4ss_frame = QWidget()
         self.ue4ss_layout = QVBoxLayout()
@@ -612,6 +708,7 @@ QTreeView::item:selected {
         """)
 
         self._refresh_ue4ss_status()
+        self._refresh_magic_status()   # NEW
 
         # Connect tab change handler
         self.notebook.currentChanged.connect(self._on_tab_changed)
@@ -828,6 +925,14 @@ QTreeView::item:selected {
                 if not extract_dir:
                     continue
                     
+                # --- Abort if MagicLoader.exe is present in the extracted archive ---
+                for root, _, files in os.walk(extract_dir):
+                    for file in files:
+                        if file.lower() == "magicloader.exe":
+                            self.show_status("Aborted: MagicLoader installer archive detected. Please do not install MagicLoader as a mod.", 10000, "error")
+                            shutil.rmtree(extract_dir, ignore_errors=True)
+                            return
+                
                 # Install the extracted files
                 self._install_extracted_mod(extract_dir, os.path.basename(archive_path))
                 
@@ -1076,6 +1181,35 @@ QTreeView::item:selected {
                     installed_shared += 1
         # --- End UE4SS mod install ---
         
+        # --- MagicLoader folder detection (archive may bundle MagicLoader/...) ----
+        magic_dirs = []
+        for root, dirs, _ in os.walk(extract_dir):
+            for d in dirs:
+                if d.lower() == "magicloader":
+                    magic_dirs.append(os.path.join(root, d))
+
+        installed_ml = 0
+        if magic_dirs:
+            from mod_manager.magicloader_installer import get_disabled_ml_mods_dir
+            import shutil
+            dest_root = get_disabled_ml_mods_dir(self.game_path)
+            os.makedirs(dest_root, exist_ok=True)
+
+            for mdir in magic_dirs:
+                for file in os.listdir(mdir):
+                    if file.lower().endswith('.json'):
+                        src = os.path.join(mdir, file)
+                        dst = os.path.join(dest_root, file)
+                        try:
+                            shutil.copy2(src, dst)
+                            installed_ml += 1
+                        except Exception as e:
+                            print(f"[MagicLoader] failed to copy {src}: {e}")
+
+            if installed_ml:
+                self._refresh_magic_status()
+        # --- End MagicLoader folder detection ---
+        
         # Enable all installed ESPs by adding them to the end of plugins.txt
         if installed_esp_names:
             plugins = read_plugins_txt()
@@ -1096,6 +1230,8 @@ QTreeView::item:selected {
             summary_parts.append(f"{installed_ue4ss} UE4SS mod(s)")
         if installed_shared > 0:
             summary_parts.append(f"{installed_shared} UE4SS shared resource(s)")
+        if installed_ml:
+            summary_parts.append("MagicLoader")
             
         if not summary_parts:
             summary = f"No installable content found in {mod_name}."
@@ -1835,7 +1971,20 @@ QTreeView::item:selected {
                 open_folder_in_explorer(pak_folder)
             else:
                 self.show_status("Could not find PAK folder.", 4000, "error")
-        elif current_index == 2:  # UE4SS tab
+        elif current_index == 2:  # MagicLoader tab
+            # 1️⃣ try the actual installed location
+            ml_path = get_magicloader_dir(self.game_path)
+
+            # 2️⃣ fall back to the expected target dir (steam vs gamepass)
+            if not ml_path:
+                from pathlib import Path
+                ml_path = _target_ml_dir(Path(self.game_path), get_install_type() or "steam")
+
+            if ml_path and os.path.isdir(ml_path):
+                open_folder_in_explorer(str(ml_path))
+            else:
+                self.show_status("MagicLoader folder not found.", 4000, "error")
+        elif current_index == 3:  # UE4SS tab
             from mod_manager.ue4ss_installer import get_ue4ss_bin_dir
             ue4ss_folder = get_ue4ss_bin_dir(self.game_path)
             if ue4ss_folder and os.path.isdir(ue4ss_folder):
@@ -2299,6 +2448,203 @@ QTreeView::item:selected {
             from mod_manager.ue4ss_installer import set_ue4ss_mod_enabled
             set_ue4ss_mod_enabled(self.game_path, node.data["real"], enable)
             self._refresh_ue4ss_status()
+
+    # --------------------------------------------------------------------------
+    # MagicLoader helpers
+    # --------------------------------------------------------------------------
+    def _refresh_magic_status(self):
+        if not self.game_path:
+            self.magic_status.setText("No game path set.")
+            self.magic_enabled_view.clear(); self.magic_disabled_view.clear()
+            return
+        ok, _ = magicloader_installed(self.game_path)
+        if ok:
+            msg = f"MagicLoader detected"
+        else:
+            msg = "MagicLoader not installed."
+
+        from mod_manager.magicloader_installer import list_ml_json_mods
+        enabled, disabled = list_ml_json_mods(self.game_path)
+
+        rows = rows_from_magic(enabled, disabled)
+        enabled_rows = [r for r in rows if r["active"]]
+        disabled_rows = [r for r in rows if not r["active"]]
+        
+        # Define the color scheme for trees to match PAK tab
+        tree_colors = {
+            'bg':     QColor('#181818'),
+            'fg':     QColor('#e0e0e0'),
+            'selbg':  QColor('#333333'),
+            'selfg':  QColor('#ff9800'),
+        }
+        
+        # Refresh tree views with consistent styling
+        self.magic_enabled_view.refresh_rows(enabled_rows)
+        self.magic_disabled_view.refresh_rows(disabled_rows)
+        
+        # Ensure consistent styling with PAK tab
+        tree_stylesheet = """
+QTreeView {
+    background: #181818;
+    color: #e0e0e0;
+    selection-background-color: #333333;
+    selection-color: #ff9800;
+}
+QHeaderView::section {
+    background-color: #232323;
+    color: #ff9800;
+    font-weight: bold;
+    border: 1px solid #444;
+}
+QTreeView::item:selected {
+    background:#333333;
+    color:#ff9800;
+}
+"""
+        for view in (self.magic_enabled_view, self.magic_disabled_view):
+            view.setHeaderHidden(False)
+            view.setRootIsDecorated(True) 
+            view.expandAll()
+            view.setStyleSheet(tree_stylesheet)
+
+        msg += f"\nEnabled: {len(enabled)} | Disabled: {len(disabled)}"
+        self.magic_status.setText(msg)
+        self._update_magic_btns()
+
+    def _on_magic_action(self):
+        ok, _ = magicloader_installed(self.game_path)
+        if ok:
+            if uninstall_magicloader(self.game_path):
+                self.show_status("MagicLoader uninstalled.", 5000, "success")
+            self._refresh_magic_status()
+            return
+
+        # ---------- manual‑download flow ----------
+        self._prompt_magicloader_manual_install()
+
+    def _update_magic_btns(self):
+        ok, _ = magicloader_installed(self.game_path)
+        self.magic_action_btn.setText("Uninstall MagicLoader" if ok else "Install MagicLoader")
+        # Run button state depends on install status
+        self.magic_run_btn.setEnabled(ok)
+
+    # ------------------------------------------------------------------
+    # Manual‑download helper UI
+    # ------------------------------------------------------------------
+    def _prompt_magicloader_manual_install(self):
+        """
+        Show info box: open Nexus page or browse for already‑downloaded archive.
+        """
+        from PyQt5.QtWidgets import QMessageBox, QFileDialog
+        url = "https://www.nexusmods.com/oblivionremastered/mods/1966?tab=description"
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Install MagicLoader")
+        box.setIcon(QMessageBox.Information)
+        box.setText(
+            "MagicLoader must be downloaded manually for now.\n\n"
+            "1. Click Open Page to visit Nexus Mods.\n"
+            "2. Download the archive (.zip / .7z / .rar).\n"
+            "3. Browse and select the archive."
+        )
+        open_btn   = box.addButton("Open Page",  QMessageBox.ActionRole)
+        browse_btn = box.addButton("Browse…",    QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Cancel)
+        box.exec_()
+
+        clicked = box.clickedButton()
+        if clicked is open_btn:
+            QDesktopServices.openUrl(QUrl(url))
+            # Re‑prompt so user can browse straight away after download
+            self._prompt_magicloader_manual_install()
+        elif clicked is browse_btn:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Select MagicLoader archive", "",
+                "Archives (*.zip *.7z *.rar)"
+            )
+            if path:
+                self._manual_install_magicloader(path)
+
+    def _manual_install_magicloader(self, archive_path: str):
+        ok, err = install_magicloader(self.game_path, zip_path=archive_path)
+        if ok:
+            self.show_status("MagicLoader installed.", 5000, "success")
+        else:
+            self.show_status(f"MagicLoader install failed: {err}", 8000, "error")
+        self._refresh_magic_status()
+
+    def _toggle_magic_enabled(self):
+        from mod_manager.utils import DATA_DIR
+        disabled_root = Path(DATA_DIR)/"disabled_magicloader"/"MagicLoader"
+        ok, _ = magicloader_installed(self.game_path)
+        if ok:
+            # disable
+            if uninstall_magicloader(self.game_path):
+                self.show_status("MagicLoader disabled.", 5000, "success")
+        elif disabled_root.exists():
+            if reenable_magicloader(self.game_path):
+                self.show_status("MagicLoader re‑enabled.", 5000, "success")
+        self._refresh_magic_status()
+
+    def _toggle_magic_mod(self, index, enable: bool):
+        view = self.magic_disabled_view if enable else self.magic_enabled_view
+        src  = view._proxy.mapToSource(index)
+        node = src.internalPointer()
+        if node and not node.is_group:
+            name = node.data["real"]
+            from mod_manager.magicloader_installer import activate_ml_mod, deactivate_ml_mod, get_magicloader_dir
+            (activate_ml_mod if enable else deactivate_ml_mod)(self.game_path, name)
+            self._refresh_magic_status()
+
+            # --- Run mlcli.exe after moving the JSON ---
+            import os
+            import subprocess
+            from PyQt5.QtWidgets import QMessageBox, QPushButton
+
+            ml_dir = get_magicloader_dir(self.game_path)
+            cli_path = os.path.join(ml_dir, "mlcli.exe") if ml_dir else None
+            if not cli_path or not os.path.isfile(cli_path):
+                # Show popup with manual launch option
+                msg = QMessageBox(self)
+                msg.setWindowTitle("MagicLoader CLI Not Found")
+                msg.setIcon(QMessageBox.Warning)
+                msg.setText(
+                    "mlcli.exe (MagicLoader CLI) was not found in the MagicLoader directory.\n\n"
+                    "Please run MagicLoader manually using the button below to complete the operation."
+                )
+                run_btn = QPushButton("Run MagicLoader")
+                msg.addButton(run_btn, QMessageBox.ActionRole)
+                msg.addButton(QMessageBox.Ok)
+                ret = msg.exec_()
+                if msg.clickedButton() == run_btn:
+                    self._launch_magicloader()
+                return
+            try:
+                subprocess.run([cli_path], cwd=ml_dir, check=True)
+                self.show_status("MagicLoader CLI ran successfully.", 3000, "success")
+            except Exception as e:
+                self.show_status(f"Failed to run mlcli.exe: {e}", 6000, "error")
+
+    # ------------------------------------------------------------------
+    # Launch MagicLoader executable
+    # ------------------------------------------------------------------
+    def _launch_magicloader(self):
+        from mod_manager.magicloader_installer import get_magicloader_dir
+        import os
+
+        ml_dir = get_magicloader_dir(self.game_path)
+        if not ml_dir:
+            self.show_status("MagicLoader not installed.", 4000, "error")
+            return
+        exe = os.path.join(ml_dir, "MagicLoader.exe")
+        if not os.path.isfile(exe):
+            self.show_status("MagicLoader.exe not found.", 4000, "error")
+            return
+        try:
+            subprocess.Popen([exe], cwd=ml_dir)
+            self.show_status("MagicLoader launched.", 3000, "success")
+        except Exception as e:
+            self.show_status(f"Failed to launch MagicLoader: {e}", 6000, "error")
 
 class MigrateModsDialog(QDialog):
     def __init__(self, old_dir, new_dir, parent=None):

@@ -74,4 +74,31 @@ def rows_from_ue4ss(enabled, disabled):
             "active": False,
             "ue4ss_info": {"name": mod, "enabled": False},
         })
+    return rows
+
+# ---------------------------------------------------------------------------
+# MagicLoader JSON rows
+# ---------------------------------------------------------------------------
+def rows_from_magic(enabled, disabled):
+    rows = []
+    for mod in enabled:
+        rows.append({
+            "id": f"|{mod}",
+            "real": mod,
+            "display": mod,
+            "group": "",
+            "subfolder": None,
+            "active": True,
+            "magic_info": {"name": mod, "enabled": True},
+        })
+    for mod in disabled:
+        rows.append({
+            "id": f"|{mod}",
+            "real": mod,
+            "display": mod,
+            "group": "",
+            "subfolder": None,
+            "active": False,
+            "magic_info": {"name": mod, "enabled": False},
+        })
     return rows 

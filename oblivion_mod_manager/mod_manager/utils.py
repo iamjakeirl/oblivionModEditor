@@ -122,6 +122,12 @@ def open_folder_in_explorer(path):
 UE4SS_URL = "https://github.com/UE4SS-RE/RE-UE4SS/releases/download/experimental-latest/UE4SS_v3.0.1-394-g437a8ff.zip"
 UE4SS_VERSION = "v3.0.1-394-g437a8ff"
 
+# ----- MagicLoader ---------------------------------------------------------
+MAGICLOADER_URL     = "https://github.com/Haphestia/MagicLoader/releases/latest/download/MagicLoader.zip"
+MAGICLOADER_VERSION = "latest"
+# External download page (no direct link yet)
+MAGICLOADER_NEXUS  = "https://www.nexusmods.com/oblivionremastered/mods/1966?tab=description"
+
 def get_install_type():
     try:
         with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
