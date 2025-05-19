@@ -1,6 +1,6 @@
 # jorkXL's Oblivion Remastered Mod Manager
 
-A streamlined tool for managing ESP plugins, PAK mods, and UE4SS script mods for Oblivion Remastered.
+A streamlined tool for managing ESP plugins, PAK mods, MagicLoader mods, and UE4SS script mods for Oblivion Remastered.
 
 ## Features
 
@@ -20,7 +20,7 @@ A streamlined tool for managing ESP plugins, PAK mods, and UE4SS script mods for
 
 1. Launch the application
 2. Set your Oblivion Remastered game path (e.g., `D:\Games\The Elder Scrolls IV- Oblivion Remastered`)
-3. Use the ESP, PAK, and UE4SS tabs to manage your mods
+3. Use the ESP, PAK, MagicLoader, and UE4SS tabs to manage your mods and modloaders.
 
 ## ESP Mod Features
 
