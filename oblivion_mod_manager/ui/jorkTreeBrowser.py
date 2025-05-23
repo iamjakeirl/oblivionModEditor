@@ -52,6 +52,7 @@ QTreeView::item:selected {
         self._delete_callback = delete_callback  # fn(list[row_dict]) -> None
 
         self._expanded_paths = set()
+        self._connected_objects = []  # Track signal connections for proper cleanup
         self._wire_expansion_signals()
         
         # Set up context menu for group headers
@@ -59,23 +60,90 @@ QTreeView::item:selected {
         self.customContextMenuRequested.connect(self._show_context_menu)
 
     # ---------- expansion‑state cache ----------
+    def _unwire_expansion_signals(self):
+        """Disconnect all expansion-related signals to prevent stale model references."""
+        print(f'[MODEL-DEBUG] _unwire_expansion_signals called on {id(self)}')
+        
+        # ── 1) Disconnect ALL signals connected to our signal handlers to be safe ──
+        try:
+            self.expanded.disconnect()
+            self.collapsed.disconnect()
+            print(f'[MODEL-DEBUG] Disconnected expansion tracking signals')
+        except Exception as e:
+            print(f'[MODEL-DEBUG] Could not disconnect expansion tracking: {e}')
+            
+        # ── 2) Disconnect layout signals from tracked objects ──
+        if hasattr(self, '_connected_objects'):
+            for obj, signal_names in self._connected_objects:
+                for signal_name in signal_names:
+                    try:
+                        signal = getattr(obj, signal_name)
+                        signal.disconnect(self._capture_expanded if 'AboutToBeChanged' in signal_name else self._restore_expanded)
+                        print(f'[MODEL-DEBUG] Disconnected {signal_name} from {id(obj)}')
+                    except Exception as e:
+                        print(f'[MODEL-DEBUG] Could not disconnect {signal_name} from {id(obj)}: {e}')
+            self._connected_objects.clear()
+        else:
+            self._connected_objects = []
+            
+        # ── 3) Aggressively disconnect from current model/proxy if they exist ──
+        # This handles any connections that might not be tracked
+        if hasattr(self, '_model') and self._model:
+            try:
+                # Disconnect all signals from this model to any of our methods
+                for signal_name in ['layoutAboutToBeChanged', 'layoutChanged']:
+                    signal = getattr(self._model, signal_name)
+                    signal.disconnect()  # Disconnect ALL connections to this signal
+                print(f'[MODEL-DEBUG] Aggressively disconnected all signals from old model {id(self._model)}')
+            except Exception as e:
+                print(f'[MODEL-DEBUG] Could not aggressively disconnect from old model: {e}')
+                
+        if hasattr(self, '_proxy') and self._proxy:
+            try:
+                # Disconnect all signals from this proxy to any of our methods  
+                for signal_name in ['layoutAboutToBeChanged', 'layoutChanged']:
+                    signal = getattr(self._proxy, signal_name)
+                    signal.disconnect()  # Disconnect ALL connections to this signal
+                print(f'[MODEL-DEBUG] Aggressively disconnected all signals from old proxy {id(self._proxy)}')
+            except Exception as e:
+                print(f'[MODEL-DEBUG] Could not aggressively disconnect from old proxy: {e}')
+
     def _wire_expansion_signals(self):
         print(f'[MODEL-DEBUG] _wire_expansion_signals called on {id(self)} with model {id(self._model)}')
         self._verify_signal_connections()
         
+        # First, disconnect any existing signals to prevent stale connections
+        self._unwire_expansion_signals()
+        
+        # Initialize tracking for connected objects
+        if not hasattr(self, '_connected_objects'):
+            self._connected_objects = []
+        
         # cache whenever either model is about to change
-        for sig in (
-            self._proxy.layoutAboutToBeChanged,
-            self._model.layoutAboutToBeChanged,
-        ):
-            sig.connect(self._capture_expanded)
+        for obj, signal_name in [
+            (self._proxy, 'layoutAboutToBeChanged'),
+            (self._model, 'layoutAboutToBeChanged'),
+        ]:
+            signal = getattr(obj, signal_name)
+            signal.connect(self._capture_expanded)
+            self._connected_objects.append((obj, [signal_name]))
 
         # restore after either model changed
-        for sig in (
-            self._proxy.layoutChanged,
-            self._model.layoutChanged,
-        ):
-            sig.connect(self._restore_expanded)
+        for obj, signal_name in [
+            (self._proxy, 'layoutChanged'),
+            (self._model, 'layoutChanged'),
+        ]:
+            signal = getattr(obj, signal_name)
+            signal.connect(self._restore_expanded)
+            # Find existing entry or create new one
+            found = False
+            for i, (tracked_obj, signal_names) in enumerate(self._connected_objects):
+                if tracked_obj is obj:
+                    signal_names.append(signal_name)
+                    found = True
+                    break
+            if not found:
+                self._connected_objects.append((obj, [signal_name]))
 
         # keep the set up‑to‑date while the user toggles
         self.expanded.connect(
@@ -369,6 +437,64 @@ QTreeView::item:selected {
         AttributeError without duplicating logic elsewhere.
         """
         self.refresh_rows([])
+
+    def replace_model_and_proxy(self, new_model, new_proxy):
+        """Replace both the internal model and proxy references and update all connections."""
+        print(f'[MODEL-DEBUG] replace_model_and_proxy called on {id(self)}')
+        print(f'[MODEL-DEBUG] Replacing model {id(self._model)} -> {id(new_model)}')
+        print(f'[MODEL-DEBUG] Replacing proxy {id(self._proxy)} -> {id(new_proxy)}')
+        
+        # ── 1) Block all signals from the view to prevent any signal emissions during replacement ──
+        self.blockSignals(True)
+        
+        # ── 2) Clear expansion state immediately to prevent stale references ──
+        self._expanded_paths.clear()
+        print(f'[MODEL-DEBUG] Cleared expansion state')
+        
+        # ── 3) Disconnect all old signals aggressively ──
+        self._unwire_expansion_signals()
+        
+        # ── 4) Block signals on old model/proxy before replacing ──
+        if hasattr(self, '_model') and self._model:
+            self._model.blockSignals(True)
+        if hasattr(self, '_proxy') and self._proxy:
+            self._proxy.blockSignals(True)
+        
+        # ── 5) Update internal references ──
+        self._model = new_model
+        self._proxy = new_proxy
+        
+        # ── 6) Set the new proxy on the view (while signals are still blocked) ──
+        self.setModel(new_proxy)
+        
+        # ── 7) Unblock signals on new objects ──
+        new_model.blockSignals(False)
+        new_proxy.blockSignals(False)
+        
+        # ── 8) Re-establish signal connections with new objects ──
+        self._wire_expansion_signals()
+        
+        # ── 9) Unblock view signals ──
+        self.blockSignals(False)
+        
+        # ── 10) Defer any expansion restoration to the next event loop cycle ──
+        # This ensures all Qt internal model/view synchronization is complete first
+        QTimer.singleShot(0, self._safe_restore_expansion)
+        
+        print(f'[MODEL-DEBUG] Model and proxy replacement complete')
+        
+    def _safe_restore_expansion(self):
+        """Safely restore expansion state after ensuring all model/view sync is complete."""
+        print(f'[MODEL-DEBUG] _safe_restore_expansion called on {id(self)}')
+        try:
+            # Only try to expand if we actually have content and the model is ready
+            if self.model() and self.model().rowCount() > 0:
+                self.expandAll()
+                print(f'[MODEL-DEBUG] Safe expansion completed')
+            else:
+                print(f'[MODEL-DEBUG] No content to expand')
+        except Exception as e:
+            print(f'[MODEL-DEBUG] Safe expansion failed: {e}')
 
 # ---------------- Custom proxy with leaf/group filtering ----------------
 

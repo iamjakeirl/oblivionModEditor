@@ -101,4 +101,34 @@ def rows_from_magic(enabled, disabled):
             "active": False,
             "magic_info": {"name": mod, "enabled": False},
         })
+    return rows
+
+# ---------------------------------------------------------------------------
+# OBSE64 Plugin rows
+# ---------------------------------------------------------------------------
+def rows_from_obse64_plugins(enabled, disabled):
+    """Convert OBSE64 plugin lists to row format for ModTreeBrowser.
+    enabled/disabled are lists of .dll plugin filenames.
+    """
+    rows = []
+    for plugin in enabled:
+        rows.append({
+            "id": f"|{plugin}",
+            "real": plugin,
+            "display": plugin,
+            "group": "",
+            "subfolder": None,
+            "active": True,
+            "obse64_info": {"name": plugin, "enabled": True},
+        })
+    for plugin in disabled:
+        rows.append({
+            "id": f"|{plugin}",
+            "real": plugin,
+            "display": plugin,
+            "group": "",
+            "subfolder": None,
+            "active": False,
+            "obse64_info": {"name": plugin, "enabled": False},
+        })
     return rows 

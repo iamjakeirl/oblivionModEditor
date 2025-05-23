@@ -8,11 +8,11 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QListWidget, QListWidgetItem, QFileDialog, QMessageBox, QAbstractItemView, QCheckBox,
     QMenu, QAction, QTabWidget, QInputDialog, QProgressDialog, QFrame, QDialog, QSpacerItem, QSizePolicy,
-    QTableWidget, QTableWidgetItem, QTableView, QTreeView
+    QTableWidget, QTableWidgetItem, QTableView, QTreeView, QMenuBar
 )
 from PyQt5.QtCore import Qt, QEvent, QItemSelectionModel, QUrl, QMimeData, QTimer, QByteArray, QSortFilterProxyModel
 from PyQt5.QtGui import (
-    QDrag, QPixmap, QColor, QFont, QDragEnterEvent, QDropEvent, QDesktopServices
+    QDrag, QPixmap, QColor, QFont, QDragEnterEvent, QDropEvent, QDesktopServices, QKeySequence
 )
 from mod_manager.utils import (
     migrate_display_keys_if_needed,               #  ← NEW
@@ -84,6 +84,15 @@ from mod_manager.magicloader_installer import (
     deactivate_ml_mod, activate_ml_mod, get_magicloader_dir, _target_ml_dir
 )
 from ui.row_builders import rows_from_magic
+# NEW: OBSE64 helpers
+from mod_manager.obse64_installer import (
+    obse64_installed, install_obse64, uninstall_obse64,
+    reenable_obse64, get_obse_plugins_dir, list_obse_plugins,
+    activate_obse_plugin, deactivate_obse_plugin, get_obse64_dir, launch_obse64
+)
+from ui.row_builders import rows_from_obse64_plugins
+# NEW: Undo system
+from ui.undo_system import UndoStack, UndoAction, ToggleModAction, RenameAction, GroupChangeAction, FileOperationAction, StateSnapshot, PakToggleAction
 
 class PluginsListWidget(QListWidget):
     def __init__(self, *args, **kwargs):
@@ -139,6 +148,36 @@ class MainWindow(QWidget):
         self.resize(720, 720)
         self.layout = QVBoxLayout()
         self.setLayout(self.layout)
+
+        # Initialize undo system
+        self.undo_stack = UndoStack()
+        
+        # Create menu bar
+        self.menu_bar = QMenuBar(self)
+        self.layout.setMenuBar(self.menu_bar)
+        
+        # Create Edit menu
+        edit_menu = self.menu_bar.addMenu("&Edit")
+        
+        # Undo action
+        self.undo_action = QAction("&Undo", self)
+        self.undo_action.setShortcut(QKeySequence.Undo)
+        self.undo_action.triggered.connect(self.undo_stack.undo)
+        self.undo_action.setEnabled(False)
+        edit_menu.addAction(self.undo_action)
+        
+        # Redo action
+        self.redo_action = QAction("&Redo", self)
+        self.redo_action.setShortcut(QKeySequence.Redo)
+        self.redo_action.triggered.connect(self.undo_stack.redo)
+        self.redo_action.setEnabled(False)
+        edit_menu.addAction(self.redo_action)
+        
+        # Connect undo stack signals to update menu items
+        self.undo_stack.canUndoChanged.connect(self.undo_action.setEnabled)
+        self.undo_stack.canRedoChanged.connect(self.redo_action.setEnabled)
+        self.undo_stack.undoTextChanged.connect(self.undo_action.setText)
+        self.undo_stack.redoTextChanged.connect(self.redo_action.setText)
 
         # Enable drag and drop
         self.setAcceptDrops(True)
@@ -573,6 +612,119 @@ QTreeView::item:selected {
         self.notebook.addTab(self.ue4ss_frame, "UE4SS")
         # ------------------------------------------------------------------
 
+        # --- OBSE64 TAB ---------------------------------------------------
+        self.obse64_frame = QWidget()
+        self.obse64_layout = QVBoxLayout()
+        self.obse64_frame.setLayout(self.obse64_layout)
+
+        # Toggle row (Show real names)
+        self.chk_real_obse64 = QCheckBox("Show real names")
+        obse64_hdr = QHBoxLayout()
+        obse64_hdr.addWidget(self.chk_real_obse64)
+        self.obse64_layout.addLayout(obse64_hdr)
+
+        # Search bar for OBSE64 plugins
+        self.obse64_search = QLineEdit()
+        self.obse64_search.setPlaceholderText("Search plugins…")
+        self.obse64_layout.addWidget(self.obse64_search)
+
+        # Disabled OBSE64 plugins list (top)
+        self.obse64_disabled_label = QLabel("Disabled OBSE64 Plugins (double-click to enable):")
+        self.obse64_disabled_label.setStyleSheet("font-weight: bold; color: #ff9800;")
+        self.obse64_disabled_label.setAlignment(Qt.AlignCenter)
+        self.obse64_layout.addWidget(self.obse64_disabled_label)
+        from ui.row_builders import rows_from_obse64_plugins
+        self.obse64_disabled_view = ModTreeBrowser([], search_box=self.obse64_search,
+                                                  show_real_cb=self.chk_real_obse64.isChecked, parent=self)
+        self.obse64_layout.addWidget(self.obse64_disabled_view)
+
+        # Enabled OBSE64 plugins list (bottom)
+        self.obse64_enabled_label = QLabel("Enabled OBSE64 Plugins (double-click to disable):")
+        self.obse64_enabled_label.setStyleSheet("font-weight: bold; color: #ff9800;")
+        self.obse64_enabled_label.setAlignment(Qt.AlignCenter)
+        self.obse64_layout.addWidget(self.obse64_enabled_label)
+        self.obse64_enabled_view = ModTreeBrowser([], search_box=self.obse64_search,
+                                                 show_real_cb=self.chk_real_obse64.isChecked, parent=self)
+        self.obse64_layout.addWidget(self.obse64_enabled_view)
+
+        # Double-click enable/disable for OBSE64 plugins
+        self.obse64_enabled_view.doubleClicked.connect(lambda idx: self._toggle_obse64_plugin(idx, False))
+        self.obse64_disabled_view.doubleClicked.connect(lambda idx: self._toggle_obse64_plugin(idx, True))
+
+        # Update OBSE64 tree labels when "Show real names" toggled
+        self.chk_real_obse64.toggled.connect(self.obse64_enabled_view._model.layoutChanged.emit)
+        self.chk_real_obse64.toggled.connect(self.obse64_disabled_view._model.layoutChanged.emit)
+
+        # Attach delete-callback for OBSE64 ModTreeBrowsers
+        def _delete_obse64_rows(rows):
+            for rd in rows:
+                try:
+                    self._remove_obse64_plugin(rd["real"])
+                except Exception as e:
+                    print(f"[OBSE64-DEL] error: {e}")
+
+        self.obse64_enabled_view.set_delete_callback(_delete_obse64_rows)
+        self.obse64_disabled_view.set_delete_callback(_delete_obse64_rows)
+
+        # Apply consistent tree styling as in other tabs
+        tree_stylesheet = """
+QTreeView {
+    background: #181818;
+    color: #e0e0e0;
+    selection-background-color: #333333;
+    selection-color: #ff9800;
+}
+QHeaderView::section {
+    background-color: #232323;
+    color: #ff9800;
+    font-weight: bold;
+    border: 1px solid #444;
+}
+QTreeView::item:selected {
+    background:#333333;
+    color:#ff9800;
+}
+"""
+        for view in (self.obse64_enabled_view, self.obse64_disabled_view):
+            view.setHeaderHidden(False)
+            view.setRootIsDecorated(True)
+            view.expandAll()
+            view.setStyleSheet(tree_stylesheet)
+
+        # status label (updated by _refresh_obse64_status)
+        self.obse64_status = QLabel("")
+        self.obse64_status.setAlignment(Qt.AlignCenter)
+        self.obse64_status.setStyleSheet("font-weight:bold; color:#ff9800;")
+        self.obse64_layout.addWidget(self.obse64_status)
+
+        # button row
+        self.obse64_btn_row = QHBoxLayout()
+        
+        # Install/Action button (Install, Uninstall, or Re-enable)
+        self.obse64_action_btn = QPushButton()
+        self.obse64_action_btn.clicked.connect(self._on_obse64_action)
+        self.obse64_btn_row.addWidget(self.obse64_action_btn)
+
+        # Browse for archive button
+        self.obse64_browse_btn = QPushButton("Browse Archive")
+        self.obse64_browse_btn.clicked.connect(self._browse_obse64_archive)
+        self.obse64_btn_row.addWidget(self.obse64_browse_btn)
+
+        # Launch OBSE64 button
+        self.obse64_launch_btn = QPushButton("Launch OBSE64")
+        self.obse64_launch_btn.clicked.connect(self._launch_obse64)
+        self.obse64_btn_row.addWidget(self.obse64_launch_btn)
+
+        # Refresh button
+        self.obse64_refresh_btn = QPushButton("Refresh")
+        self.obse64_refresh_btn.clicked.connect(self._refresh_obse64_status)
+        self.obse64_btn_row.addWidget(self.obse64_refresh_btn)
+
+        self.obse64_layout.addLayout(self.obse64_btn_row)
+
+        self.notebook.addTab(self.obse64_frame, "OBSE64")
+        # ------------------------------------------------------------------
+
         # Add a status message area at the bottom of the window
         self.status_frame = QFrame()
         self.status_frame.setFrameShape(QFrame.StyledPanel)
@@ -709,6 +861,7 @@ QTreeView::item:selected {
 
         self._refresh_ue4ss_status()
         self._refresh_magic_status()   # NEW
+        self._refresh_obse64_status()  # NEW
 
         # Connect tab change handler
         self.notebook.currentChanged.connect(self._on_tab_changed)
@@ -933,7 +1086,22 @@ QTreeView::item:selected {
                             shutil.rmtree(extract_dir, ignore_errors=True)
                             return
                 
-                # Install the extracted files
+                # --- Check if this is an OBSE64 archive ---
+                is_obse64_archive = False
+                obse64_files = []
+                for root, _, files in os.walk(extract_dir):
+                    for file in files:
+                        if file.lower() == "obse64_loader.exe" or (file.lower().startswith("obse64_") and file.lower().endswith(".dll")):
+                            is_obse64_archive = True
+                            obse64_files.append(os.path.join(root, file))
+                
+                if is_obse64_archive:
+                    # This is an OBSE64 archive, install it directly
+                    self._install_obse64_archive(archive_path)
+                    shutil.rmtree(extract_dir, ignore_errors=True)
+                    continue
+                
+                # Install the extracted files as regular mod
                 self._install_extracted_mod(extract_dir, os.path.basename(archive_path))
                 
                 # Clean up the temporary directory
@@ -1506,7 +1674,30 @@ QTreeView::item:selected {
         reconcile_pak_list(self.game_path)
         pak_mods = list_managed_paks()
 
-        # ── 1) DETACH OLD MODELS so Qt never keeps indexes from a dead proxy ──
+        # ── 1) PROPERLY DISCONNECT OLD SIGNALS AND DETACH OLD MODELS ──
+        # First, disconnect expansion signals to prevent stale model references
+        for _view in (self.active_pak_view, self.inactive_pak_view):
+            _view._unwire_expansion_signals()
+            
+        # Disconnect search box and checkbox connections to old models/proxies
+        try:
+            self.pak_search.textChanged.disconnect()
+            self.chk_real.toggled.disconnect()
+        except Exception:
+            pass
+            
+        # Clean up old models and proxies to prevent memory leaks
+        for attr_name in ['active_pak_model', 'inactive_pak_model', 'active_pak_proxy', 'inactive_pak_proxy']:
+            if hasattr(self, attr_name):
+                old_obj = getattr(self, attr_name)
+                if old_obj:
+                    try:
+                        old_obj.deleteLater()
+                    except Exception:
+                        pass
+                    setattr(self, attr_name, None)
+            
+        # Then detach old models so Qt never keeps indexes from a dead proxy
         for _view in (self.active_pak_view, self.inactive_pak_view):
             _view.setModel(None)
 
@@ -1543,7 +1734,7 @@ QTreeView::item:selected {
     color:#ff9800;
 }
 """
-        # Models and proxies
+        # ── 3) Create new models and proxies (but don't connect signals yet) ──
         self.active_pak_model = ModTreeModel(
             enabled_rows,
             show_real_cb=self.chk_real.isChecked,
@@ -1562,19 +1753,14 @@ QTreeView::item:selected {
         self.inactive_pak_proxy.setSourceModel(self.inactive_pak_model)
         self.inactive_pak_proxy.setFilterKeyColumn(-1)
 
-        # Instead of just setting the model on the view, update the view's internal _model
-        # This ensures the expansion state signals are connected to the right model
-        self.active_pak_view._model = self.active_pak_model
-        self.inactive_pak_view._model = self.inactive_pak_model
+        # ── 4) Replace model and proxy references in views ──
+        self.active_pak_view.replace_model_and_proxy(self.active_pak_model, self.active_pak_proxy)
+        self.inactive_pak_view.replace_model_and_proxy(self.inactive_pak_model, self.inactive_pak_proxy)
         
-        # Wire up the connections again since we've replaced the models
-        self.active_pak_view._wire_expansion_signals()
-        self.inactive_pak_view._wire_expansion_signals()
-        
+        # ── 5) Configure view properties ──
         for view, proxy in (
             (self.active_pak_view,   self.active_pak_proxy),
             (self.inactive_pak_view, self.inactive_pak_proxy)):
-            view.setModel(proxy)
             view.setHeaderHidden(False)
             view.setRootIsDecorated(True)
             view.expandAll()                        # default expanded; user can collapse
@@ -1584,11 +1770,12 @@ QTreeView::item:selected {
             except Exception:
                 pass
 
-        # Connect toggles to both models
+        # ── 6) NOW connect signals after all model setup is complete ──
+        # Connect toggles to both models (deferred to prevent premature signal emission)
         self.chk_real.toggled.connect(self.active_pak_model.layoutChanged.emit)
         self.chk_real.toggled.connect(self.inactive_pak_model.layoutChanged.emit)
 
-        # Search box filters both proxies
+        # Search box filters both proxies (also deferred)
         self.pak_search.textChanged.connect(self.active_pak_proxy.setFilterFixedString)
         self.pak_search.textChanged.connect(self.inactive_pak_proxy.setFilterFixedString)
         # Double-click to activate/deactivate
@@ -1634,20 +1821,20 @@ QTreeView::item:selected {
         src_index = self.inactive_pak_proxy.mapToSource(index)
         is_grp, node = self._is_group_index(src_index)
         if is_grp:
-            # bulk‑activate all child leaf nodes
+            # bulk‑activate all child leaf nodes (no undo for bulk operations yet)
             for child in node.children:
                 if not child.is_group:
                     activate_pak(self.game_path, child.data["pak_info"])
             self._load_pak_list()
             self._print_model_relationships("After _activate_pak_view_row -> _load_pak_list")
             return
+        
+        # Single mod - use undo system
         pak_info = node.data["pak_info"]
-        success = activate_pak(self.game_path, pak_info)
-        if not success:
-            self.show_status(f"Error: Failed to activate PAK mod: {pak_info['name']}", 5000, "error")
-        else:
-            self.show_status(f"Activated PAK mod: {pak_info['name']}", 3000, "success")
-        self._load_pak_list()
+        pak_id = node.data["id"]  # Get ID from row data, not pak_info
+        self._toggle_pak_with_undo(pak_id, True)
+        self.show_status(f"Activated PAK mod: {pak_info['name']}", 3000, "success")
+        self._print_model_relationships("After _activate_pak_view_row -> undo toggle")
 
     def _deactivate_pak_view_row(self, index):
         print('[DND] _deactivate_pak_view_row called')
@@ -1658,19 +1845,20 @@ QTreeView::item:selected {
         src_index = self.active_pak_proxy.mapToSource(index)
         is_grp, node = self._is_group_index(src_index)
         if is_grp:
+            # bulk operations (no undo for bulk operations yet)
             for child in node.children:
                 if not child.is_group:
                     deactivate_pak(self.game_path, child.data["pak_info"])
             self._load_pak_list()
             self._print_model_relationships("After _deactivate_pak_view_row -> _load_pak_list")
             return
+        
+        # Single mod - use undo system
         pak_info = node.data["pak_info"]
-        success = deactivate_pak(self.game_path, pak_info)
-        if not success:
-            self.show_status(f"Error: Failed to deactivate PAK mod: {pak_info['name']}", 5000, "error")
-        else:
-            self.show_status(f"Deactivated PAK mod: {pak_info['name']}", 3000, "success")
-        self._load_pak_list()
+        pak_id = node.data["id"]  # Get ID from row data, not pak_info
+        self._toggle_pak_with_undo(pak_id, False)
+        self.show_status(f"Deactivated PAK mod: {pak_info['name']}", 3000, "success")
+        self._print_model_relationships("After _deactivate_pak_view_row -> undo toggle")
 
     def _show_pak_view_context_menu(self, pos, enabled):
         """
@@ -1956,7 +2144,7 @@ QTreeView::item:selected {
 
     def open_current_tab_folder(self):
         """
-        Open the ESP, PAK, or UE4SS directory depending on the selected tab.
+        Open the ESP, PAK, UE4SS, or OBSE64 directory depending on the selected tab.
         """
         current_index = self.notebook.currentIndex()
         if current_index == 0:  # ESP Mods tab
@@ -1991,6 +2179,12 @@ QTreeView::item:selected {
                 open_folder_in_explorer(ue4ss_folder)
             else:
                 self.show_status("UE4SS folder not found.", 4000, "error")
+        elif current_index == 4:  # OBSE64 tab
+            obse64_folder = get_obse64_dir(self.game_path)
+            if obse64_folder and os.path.isdir(obse64_folder):
+                open_folder_in_explorer(str(obse64_folder))
+            else:
+                self.show_status("OBSE64 folder not found.", 4000, "error")
 
     def _process_dropped_files(self, file_paths):
         """
@@ -2430,24 +2624,23 @@ QTreeView::item:selected {
         src = self.esp_disabled_view._proxy.mapToSource(index)
         node = src.internalPointer()
         if node and not node.is_group:
-            self._esp_set_enabled(node.data["real"], True)
-            self.refresh_lists()
+            esp_name = node.data["real"]
+            self._toggle_esp_with_undo(esp_name, True)
 
     def _deactivate_esp_row(self, index):
         src = self.esp_enabled_view._proxy.mapToSource(index)
         node = src.internalPointer()
         if node and not node.is_group and node.data["real"] not in DEFAULT_LOAD_ORDER:
-            self._esp_set_enabled(node.data["real"], False)
-            self.refresh_lists()
+            esp_name = node.data["real"]
+            self._toggle_esp_with_undo(esp_name, False)
 
     def _toggle_ue4ss_mod(self, index, enable: bool):
         view = self.ue4ss_disabled_view if enable else self.ue4ss_enabled_view
         src = view._proxy.mapToSource(index)
         node = src.internalPointer()
         if node and not node.is_group:
-            from mod_manager.ue4ss_installer import set_ue4ss_mod_enabled
-            set_ue4ss_mod_enabled(self.game_path, node.data["real"], enable)
-            self._refresh_ue4ss_status()
+            mod_name = node.data["real"]
+            self._toggle_ue4ss_with_undo(mod_name, enable)
 
     # --------------------------------------------------------------------------
     # MagicLoader helpers
@@ -2592,38 +2785,8 @@ QTreeView::item:selected {
         node = src.internalPointer()
         if node and not node.is_group:
             name = node.data["real"]
-            from mod_manager.magicloader_installer import activate_ml_mod, deactivate_ml_mod, get_magicloader_dir
-            (activate_ml_mod if enable else deactivate_ml_mod)(self.game_path, name)
-            self._refresh_magic_status()
-
-            # --- Run mlcli.exe after moving the JSON ---
-            import os
-            import subprocess
-            from PyQt5.QtWidgets import QMessageBox, QPushButton
-
-            ml_dir = get_magicloader_dir(self.game_path)
-            cli_path = os.path.join(ml_dir, "mlcli.exe") if ml_dir else None
-            if not cli_path or not os.path.isfile(cli_path):
-                # Show popup with manual launch option
-                msg = QMessageBox(self)
-                msg.setWindowTitle("MagicLoader CLI Not Found")
-                msg.setIcon(QMessageBox.Warning)
-                msg.setText(
-                    "mlcli.exe (MagicLoader CLI) was not found in the MagicLoader directory.\n\n"
-                    "Please run MagicLoader manually using the button below to complete the operation."
-                )
-                run_btn = QPushButton("Run MagicLoader")
-                msg.addButton(run_btn, QMessageBox.ActionRole)
-                msg.addButton(QMessageBox.Ok)
-                ret = msg.exec_()
-                if msg.clickedButton() == run_btn:
-                    self._launch_magicloader()
-                return
-            try:
-                subprocess.run([cli_path], cwd=ml_dir, check=True)
-                self.show_status("MagicLoader CLI ran successfully.", 3000, "success")
-            except Exception as e:
-                self.show_status(f"Failed to run mlcli.exe: {e}", 6000, "error")
+            # Use undo system for the toggle
+            self._toggle_magic_with_undo(name, enable)
 
     # ------------------------------------------------------------------
     # Launch MagicLoader executable
@@ -2644,7 +2807,474 @@ QTreeView::item:selected {
             subprocess.Popen([exe], cwd=ml_dir)
             self.show_status("MagicLoader launched.", 3000, "success")
         except Exception as e:
-            self.show_status(f"Failed to launch MagicLoader: {e}", 6000, "error")
+            self.show_status(f"Failed to launch MagicLoader: {e}", 8000, "error")
+
+    # -------------------------------------------------------------------------
+    # OBSE64 Methods
+    # -------------------------------------------------------------------------
+
+    def _refresh_obse64_status(self):
+        """Refresh OBSE64 status and plugin lists."""
+        if not self.game_path:
+            self.obse64_status.setText("No game path set.")
+            self.obse64_enabled_view.clear()
+            self.obse64_disabled_view.clear()
+            return
+        
+        # Check if OBSE64 is installed
+        is_installed, version_or_error = obse64_installed(self.game_path)
+        
+        if is_installed:
+            # Get plugin lists
+            enabled, disabled = list_obse_plugins(self.game_path)
+            
+            # Build rows for tree display
+            rows = rows_from_obse64_plugins(enabled, disabled)
+            enabled_rows = [r for r in rows if r["active"]]
+            disabled_rows = [r for r in rows if not r["active"]]
+            
+            # Apply tree styling and update views
+            tree_stylesheet = """
+QTreeView {
+    background: #181818;
+    color: #e0e0e0;
+    selection-background-color: #333333;
+    selection-color: #ff9800;
+}
+QHeaderView::section {
+    background-color: #232323;
+    color: #ff9800;
+    font-weight: bold;
+    border: 1px solid #444;
+}
+QTreeView::item:selected {
+    background:#333333;
+    color:#ff9800;
+}
+"""
+            for view in (self.obse64_enabled_view, self.obse64_disabled_view):
+                view.refresh_rows(enabled_rows if view is self.obse64_enabled_view else disabled_rows)
+                view.setHeaderHidden(False)
+                view.setRootIsDecorated(True)
+                view.expandAll()
+                view.setStyleSheet(tree_stylesheet)
+            
+            # Update status message
+            obse_dir = get_obse64_dir(self.game_path)
+            msg = f"OBSE64 detected (version: {version_or_error}) in\n{obse_dir}"
+            msg += f"\nEnabled: {len(enabled)} | Disabled: {len(disabled)}"
+        else:
+            # Clear views and show error/not installed status
+            self.obse64_enabled_view.clear()
+            self.obse64_disabled_view.clear()
+            msg = version_or_error  # This will be the error message
+        
+        self.obse64_status.setText(msg)
+        self._update_obse64_btns()
+
+    def _update_obse64_btns(self):
+        """Update OBSE64 button states based on installation status."""
+        is_installed, version_or_error = obse64_installed(self.game_path)
+        
+        # Check if we have disabled OBSE64 backup
+        from mod_manager.utils import DATA_DIR
+        disabled_dir = DATA_DIR / "disabled_obse64"
+        has_disabled = disabled_dir.exists() and any(disabled_dir.glob("obse64_*"))
+        
+        if is_installed:
+            self.obse64_action_btn.setText("Uninstall")
+            self.obse64_action_btn.setEnabled(True)
+            self.obse64_browse_btn.setEnabled(False)  # Don't allow install over existing
+            self.obse64_launch_btn.setEnabled(True)
+        elif has_disabled:
+            self.obse64_action_btn.setText("Re-enable")
+            self.obse64_action_btn.setEnabled(True)
+            self.obse64_browse_btn.setEnabled(True)  # Allow fresh install
+            self.obse64_launch_btn.setEnabled(False)
+        else:
+            self.obse64_action_btn.setText("Install")
+            self.obse64_action_btn.setEnabled(False)  # Needs browse first
+            self.obse64_browse_btn.setEnabled(True)
+            self.obse64_launch_btn.setEnabled(False)
+
+    def _on_obse64_action(self):
+        """Handle OBSE64 action button (Install/Uninstall/Re-enable)."""
+        if not self.game_path:
+            self.show_status("Set game path first.", 6000, "error")
+            return
+        
+        is_installed, _ = obse64_installed(self.game_path)
+        
+        if is_installed:
+            self._uninstall_obse64()
+        else:
+            # Check if we have disabled backup to re-enable
+            from mod_manager.utils import DATA_DIR
+            disabled_dir = DATA_DIR / "disabled_obse64"
+            if disabled_dir.exists() and any(disabled_dir.glob("obse64_*")):
+                self._reenable_obse64()
+            else:
+                # Need to browse for archive
+                self.show_status("Use 'Browse Archive' button to select OBSE64 archive for installation.", 6000, "info")
+
+    def _browse_obse64_archive(self):
+        """Browse for OBSE64 archive and install it."""
+        if not self.game_path:
+            self.show_status("Set game path first.", 6000, "error")
+            return
+        
+        # Check Steam restriction
+        from mod_manager.utils import get_install_type
+        install_type = get_install_type()
+        if install_type != "steam":
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self,
+                "OBSE64 Not Supported",
+                f"OBSE64 is only supported on Steam installations.\n"
+                f"Your installation type: {install_type or 'Unknown'}\n\n"
+                f"Please use a Steam installation of Oblivion Remastered to use OBSE64.",
+                QMessageBox.Ok
+            )
+            return
+        
+        # Browse for archive
+        archive_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select OBSE64 Archive",
+            "",
+            "Archive Files (*.zip *.7z *.rar);;All Files (*)"
+        )
+        
+        if not archive_path:
+            return
+        
+        self._install_obse64_archive(archive_path)
+
+    def _install_obse64_archive(self, archive_path):
+        """Install OBSE64 from the given archive path."""
+        # Show progress dialog
+        dlg = QProgressDialog("Installing OBSE64...", "Cancel", 0, 0, self)
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.show()
+        
+        def progress_callback(message):
+            dlg.setLabelText(message)
+            QApplication.processEvents()
+        
+        try:
+            success, message = install_obse64(self.game_path, archive_path, progress_callback)
+            dlg.close()
+            
+            if success:
+                self.show_status(message, 5000, "success")
+            else:
+                self.show_status(f"OBSE64 installation failed: {message}", 8000, "error")
+        except Exception as e:
+            dlg.close()
+            self.show_status(f"OBSE64 installation error: {e}", 8000, "error")
+        
+        self._refresh_obse64_status()
+
+    def _uninstall_obse64(self):
+        """Uninstall OBSE64 (move to disabled folder)."""
+        from PyQt5.QtWidgets import QMessageBox
+        
+        reply = QMessageBox.warning(
+            self,
+            "Uninstall OBSE64",
+            "This will disable OBSE64 by moving its files to a backup location.\n"
+            "OBSE64 plugins will remain in place but won't be loaded.\n\n"
+            "You can re-enable OBSE64 later using the 'Re-enable' button.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            self.show_status("OBSE64 uninstall cancelled.", 4000, "info")
+            return
+        
+        if uninstall_obse64(self.game_path):
+            self.show_status("OBSE64 disabled successfully.", 5000, "success")
+        else:
+            self.show_status("OBSE64 uninstall failed.", 8000, "error")
+        
+        self._refresh_obse64_status()
+
+    def _reenable_obse64(self):
+        """Re-enable OBSE64 from disabled backup."""
+        if reenable_obse64(self.game_path):
+            self.show_status("OBSE64 re-enabled successfully.", 5000, "success")
+        else:
+            self.show_status("OBSE64 re-enable failed.", 8000, "error")
+        
+        self._refresh_obse64_status()
+
+    def _launch_obse64(self):
+        """Launch the game via OBSE64 loader."""
+        if not self.game_path:
+            self.show_status("Set game path first.", 6000, "error")
+            return
+        
+        is_installed, _ = obse64_installed(self.game_path)
+        if not is_installed:
+            self.show_status("OBSE64 is not installed.", 6000, "error")
+            return
+        
+        if launch_obse64(self.game_path):
+            self.show_status("Launching game via OBSE64...", 3000, "success")
+        else:
+            self.show_status("Failed to launch OBSE64.", 6000, "error")
+
+    def _toggle_obse64_plugin(self, index, enable: bool):
+        """Toggle OBSE64 plugin enabled/disabled state."""
+        if not index.isValid():
+            return
+        
+        # Get the plugin name from the model
+        model = index.model()
+        if hasattr(model, '_model') and hasattr(model._model, 'data'):
+            # This is a proxy model, get the underlying model
+            source_index = model.mapToSource(index)
+            row_data = model._model.data(source_index, Qt.UserRole)
+        else:
+            row_data = model.data(index, Qt.UserRole)
+        
+        if not row_data or 'obse64_info' not in row_data:
+            return
+        
+        plugin_name = row_data['obse64_info']['name']
+        
+        # Use undo system for toggle
+        self._toggle_obse64_with_undo(plugin_name, enable)
+        
+        # Show status message
+        action = "enabled" if enable else "disabled"
+        self.show_status(f"OBSE64 plugin '{plugin_name}' {action}.", 3000, "success")
+
+    def _remove_obse64_plugin(self, plugin_name):
+        """Remove OBSE64 plugin permanently."""
+        from PyQt5.QtWidgets import QMessageBox
+        
+        reply = QMessageBox.question(
+            self,
+            "Confirm Removal",
+            f"Are you sure you want to permanently delete OBSE64 plugin '{plugin_name}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        try:
+            plugins_dir = get_obse_plugins_dir(self.game_path)
+            if not plugins_dir:
+                self.show_status("OBSE64 plugins directory not found.", 6000, "error")
+                return
+            
+            # Check both enabled and disabled locations
+            plugin_path = plugins_dir / plugin_name
+            disabled_path = plugins_dir / "disabled" / plugin_name
+            
+            removed = False
+            if plugin_path.exists():
+                plugin_path.unlink()
+                removed = True
+            if disabled_path.exists():
+                disabled_path.unlink()
+                removed = True
+            
+            if removed:
+                self.show_status(f"OBSE64 plugin '{plugin_name}' was deleted successfully.", 4000, "success")
+                self._refresh_obse64_status()
+            else:
+                self.show_status(f"OBSE64 plugin '{plugin_name}' not found.", 6000, "error")
+        except Exception as e:
+            self.show_status(f"Failed to delete OBSE64 plugin '{plugin_name}': {str(e)}", 8000, "error")
+
+    # =============================================================================
+    # UNDO SYSTEM INTEGRATION HELPERS
+    # =============================================================================
+    
+    def _create_toggle_action(self, mod_id: str, tab_type: str, old_state: bool, new_state: bool, 
+                             toggle_callback, refresh_callback) -> ToggleModAction:
+        """Create a toggle action for the undo system."""
+        return ToggleModAction(mod_id, tab_type, old_state, new_state, 
+                              toggle_callback, refresh_callback)
+                              
+    def _create_rename_action(self, target_id: str, old_name: str, new_name: str,
+                             rename_callback, refresh_callback) -> RenameAction:
+        """Create a rename action for the undo system."""
+        return RenameAction(target_id, old_name, new_name, rename_callback, refresh_callback)
+        
+    def _create_group_action(self, mod_id: str, old_group: str, new_group: str,
+                            group_callback, refresh_callback) -> GroupChangeAction:
+        """Create a group change action for the undo system.""" 
+        return GroupChangeAction(mod_id, old_group, new_group, group_callback, refresh_callback)
+        
+    def _execute_with_undo(self, action: UndoAction) -> bool:
+        """Execute an action and add it to the undo stack."""
+        print(f'[UNDO-DEBUG] _execute_with_undo called with action: {action.description}')
+        result = self.undo_stack.push(action)
+        print(f'[UNDO-DEBUG] undo_stack.push returned: {result}')
+        print(f'[UNDO-DEBUG] undo_stack.can_undo: {self.undo_stack.can_undo()}')
+        print(f'[UNDO-DEBUG] undo_stack actions count: {len(self.undo_stack.actions)}')
+        return result
+
+    # =============================================================================
+    # UNDO-ENABLED TOGGLE WRAPPERS
+    # =============================================================================
+    
+    def _toggle_pak_with_undo(self, pak_id: str, enable: bool):
+        """Toggle PAK mod with undo support."""
+        print(f'[UNDO-DEBUG] _toggle_pak_with_undo called: pak_id={pak_id}, enable={enable}')
+        # Get current state and pak_info
+        from mod_manager.pak_manager import list_managed_paks
+        all_paks = list_managed_paks()
+        
+        # Find current state by reconstructing the ID from pak data
+        current_state = False
+        
+        for pak in all_paks:
+            # Reconstruct the pak_id from pak data: "subfolder|name"
+            pak_subfolder = pak.get('subfolder', '') or ''
+            reconstructed_id = f"{pak_subfolder}|{pak['name']}"
+            
+            if reconstructed_id == pak_id:
+                current_state = pak.get('active', False)
+                break
+        
+        print(f'[UNDO-DEBUG] current_state: {current_state}, desired state: {enable}')
+        
+        if current_state == enable:
+            print(f'[UNDO-DEBUG] Already in desired state, returning early')
+            return  # Already in desired state
+            
+        # Use special PAK action that looks up fresh pak_info at execution time
+        action = PakToggleAction(
+            pak_id, current_state, enable, 
+            self.game_path, self._load_pak_list
+        )
+        print(f'[UNDO-DEBUG] Created PakToggleAction: {action.description}')
+        self._execute_with_undo(action)
+        
+    def _toggle_esp_with_undo(self, esp_name: str, enable: bool):
+        """Toggle ESP mod with undo support."""
+        # Get current state from plugins.txt
+        plugins_lines = read_plugins_txt()
+        current_state = False
+        
+        # Check if the ESP is currently enabled (uncommented in plugins.txt)
+        for line in plugins_lines:
+            clean_name = line.lstrip('#').strip()
+            if clean_name == esp_name:
+                current_state = not line.startswith('#')  # enabled if not commented
+                break
+        
+        if current_state == enable:
+            return  # Already in desired state
+            
+        # Create toggle action
+        def toggle_callback(mod_id, new_state):
+            self._esp_set_enabled(mod_id, new_state)
+            
+        action = self._create_toggle_action(
+            esp_name, "ESP", current_state, enable,
+            toggle_callback, self.refresh_lists
+        )
+        self._execute_with_undo(action)
+        
+    def _toggle_ue4ss_with_undo(self, mod_name: str, enable: bool):
+        """Toggle UE4SS mod with undo support.""" 
+        from mod_manager.ue4ss_installer import read_ue4ss_mods_txt
+        
+        # Get current state from mods.txt file, not folder existence
+        enabled_mods, disabled_mods = read_ue4ss_mods_txt(self.game_path)
+        current_state = mod_name in enabled_mods
+        
+        if current_state == enable:
+            return  # Already in desired state
+            
+        # Create toggle action
+        def toggle_callback(mod_id, new_state):
+            from mod_manager.ue4ss_installer import set_ue4ss_mod_enabled
+            set_ue4ss_mod_enabled(self.game_path, mod_id, new_state)
+            
+        action = self._create_toggle_action(
+            mod_name, "UE4SS", current_state, enable,
+            toggle_callback, self._refresh_ue4ss_status
+        )
+        self._execute_with_undo(action)
+        
+    def _toggle_magic_with_undo(self, mod_name: str, enable: bool):
+        """Toggle MagicLoader mod with undo support."""
+        from mod_manager.magicloader_installer import list_ml_json_mods
+        
+        enabled_mods, disabled_mods = list_ml_json_mods(self.game_path)
+        current_state = any(m == mod_name for m in enabled_mods)
+        
+        if current_state == enable:
+            return  # Already in desired state
+            
+        # Create toggle action
+        def toggle_callback(mod_id, new_state):
+            from mod_manager.magicloader_installer import activate_ml_mod, deactivate_ml_mod
+            if new_state:
+                activate_ml_mod(self.game_path, mod_id)
+            else:
+                deactivate_ml_mod(self.game_path, mod_id)
+                
+        action = self._create_toggle_action(
+            mod_name, "MagicLoader", current_state, enable,
+            toggle_callback, self._refresh_magic_status
+        )
+        self._execute_with_undo(action)
+        
+    def _toggle_obse64_with_undo(self, plugin_name: str, enable: bool):
+        """Toggle OBSE64 plugin with undo support."""
+        enabled_plugins, disabled_plugins = list_obse_plugins(self.game_path)
+        current_state = any(p == plugin_name for p in enabled_plugins)
+        
+        if current_state == enable:
+            return  # Already in desired state
+            
+        # Create toggle action
+        def toggle_callback(mod_id, new_state):
+            if new_state:
+                activate_obse_plugin(self.game_path, mod_id)
+            else:
+                deactivate_obse_plugin(self.game_path, mod_id)
+                
+        action = self._create_toggle_action(
+            plugin_name, "OBSE64", current_state, enable,
+            toggle_callback, self._refresh_obse64_status
+        )
+        self._execute_with_undo(action)
+
+    # =============================================================================
+    # UNDO-ENABLED RENAME/GROUP WRAPPERS
+    # =============================================================================
+    
+    def _rename_with_undo(self, mod_id: str, old_name: str, new_name: str, refresh_callback):
+        """Rename mod with undo support."""
+        def rename_callback(target_id, name):
+            set_display_info(target_id, display=name)
+            
+        action = self._create_rename_action(mod_id, old_name, new_name, 
+                                          rename_callback, refresh_callback)
+        self._execute_with_undo(action)
+        
+    def _change_group_with_undo(self, mod_id: str, old_group: str, new_group: str, refresh_callback):
+        """Change mod group with undo support."""
+        def group_callback(target_id, group):
+            set_display_info(target_id, group=group)
+            
+        action = self._create_group_action(mod_id, old_group, new_group,
+                                         group_callback, refresh_callback)
+        self._execute_with_undo(action)
+
 
 class MigrateModsDialog(QDialog):
     def __init__(self, old_dir, new_dir, parent=None):

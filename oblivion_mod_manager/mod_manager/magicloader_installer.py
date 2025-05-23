@@ -22,7 +22,7 @@ MAGICLOADER_FOLDER  = "MagicLoader"
 ML_EXE              = "MagicLoader.exe"
 ML_CLI              = "mlcli.exe"
 
-DEBUG = False
+DEBUG = True
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -221,6 +221,42 @@ def list_ml_json_mods(game_root: str | Path) -> Tuple[List[str], List[str]]:
     return enabled, disabled
 
 
+def _call_ml_cli(game_root: str | Path, command: str = "reload") -> Tuple[bool, str]:
+    """Call MagicLoader CLI tool to reload configuration."""
+    ml_dir = get_magicloader_dir(game_root)
+    if not ml_dir:
+        return False, "MagicLoader not found"
+    
+    cli_exe = ml_dir / ML_CLI
+    if not cli_exe.exists():
+        return False, f"mlcli.exe not found at {cli_exe}"
+    
+    try:
+        result = subprocess.run(
+            [str(cli_exe), command],
+            cwd=str(ml_dir),
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if DEBUG:
+            print(f"[MagicLoader CLI] Command: {command}")
+            print(f"[MagicLoader CLI] Return code: {result.returncode}")
+            print(f"[MagicLoader CLI] Output: {result.stdout}")
+            if result.stderr:
+                print(f"[MagicLoader CLI] Error: {result.stderr}")
+        
+        output = result.stdout.strip() if result.stdout else ""
+        error = result.stderr.strip() if result.stderr else ""
+        combined = f"{output}\n{error}".strip() if error else output
+        
+        return result.returncode == 0, combined
+    except subprocess.TimeoutExpired:
+        return False, "CLI command timed out"
+    except Exception as e:
+        return False, f"CLI execution failed: {e}"
+
+
 def deactivate_ml_mod(game_root: str | Path, json_name: str) -> bool:
     enabled_dir = get_ml_mods_dir(game_root)
     disabled_dir = get_disabled_ml_mods_dir(game_root)
@@ -234,8 +270,18 @@ def deactivate_ml_mod(game_root: str | Path, json_name: str) -> bool:
         if dest.exists():
             dest.unlink()
         shutil.move(str(src), str(dest))
+        
+        # Call CLI to reload MagicLoader configuration
+        success, output = _call_ml_cli(game_root, "reload")
+        if DEBUG or not success:
+            print(f"[MagicLoader] Deactivated {json_name}")
+            if output:
+                print(f"[MagicLoader CLI Output] {output}")
+        
         return True
-    except Exception:
+    except Exception as e:
+        if DEBUG:
+            print(f"[MagicLoader] Failed to deactivate {json_name}: {e}")
         return False
 
 
@@ -252,6 +298,16 @@ def activate_ml_mod(game_root: str | Path, json_name: str) -> bool:
         if dest.exists():
             dest.unlink()
         shutil.move(str(src), str(dest))
+        
+        # Call CLI to reload MagicLoader configuration
+        success, output = _call_ml_cli(game_root, "reload")
+        if DEBUG or not success:
+            print(f"[MagicLoader] Activated {json_name}")
+            if output:
+                print(f"[MagicLoader CLI Output] {output}")
+        
         return True
-    except Exception:
+    except Exception as e:
+        if DEBUG:
+            print(f"[MagicLoader] Failed to activate {json_name}: {e}")
         return False
