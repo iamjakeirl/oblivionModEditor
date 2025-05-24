@@ -311,3 +311,81 @@ def activate_ml_mod(game_root: str | Path, json_name: str) -> bool:
         if DEBUG:
             print(f"[MagicLoader] Failed to activate {json_name}: {e}")
         return False
+
+
+def bulk_activate_ml_mods(game_root: str | Path, json_names: List[str]) -> Tuple[int, int]:
+    """
+    Bulk activate multiple MagicLoader JSON mods without calling CLI each time.
+    Returns (successful_count, failed_count).
+    Call reload_ml_config() afterwards to apply changes.
+    """
+    enabled_dir = get_ml_mods_dir(game_root)
+    disabled_dir = get_disabled_ml_mods_dir(game_root)
+    if not enabled_dir or not disabled_dir:
+        return 0, len(json_names)
+    
+    successful = 0
+    failed = 0
+    
+    for json_name in json_names:
+        src = disabled_dir / json_name
+        if not src.exists():
+            failed += 1
+            continue
+        try:
+            dest = enabled_dir / json_name
+            if dest.exists():
+                dest.unlink()
+            shutil.move(str(src), str(dest))
+            successful += 1
+            if DEBUG:
+                print(f"[MagicLoader] Moved {json_name} to enabled (no CLI reload yet)")
+        except Exception as e:
+            if DEBUG:
+                print(f"[MagicLoader] Failed to activate {json_name}: {e}")
+            failed += 1
+    
+    return successful, failed
+
+
+def bulk_deactivate_ml_mods(game_root: str | Path, json_names: List[str]) -> Tuple[int, int]:
+    """
+    Bulk deactivate multiple MagicLoader JSON mods without calling CLI each time.
+    Returns (successful_count, failed_count).
+    Call reload_ml_config() afterwards to apply changes.
+    """
+    enabled_dir = get_ml_mods_dir(game_root)
+    disabled_dir = get_disabled_ml_mods_dir(game_root)
+    if not enabled_dir or not disabled_dir:
+        return 0, len(json_names)
+    
+    successful = 0
+    failed = 0
+    
+    for json_name in json_names:
+        src = enabled_dir / json_name
+        if not src.exists():
+            failed += 1
+            continue
+        try:
+            dest = disabled_dir / json_name
+            if dest.exists():
+                dest.unlink()
+            shutil.move(str(src), str(dest))
+            successful += 1
+            if DEBUG:
+                print(f"[MagicLoader] Moved {json_name} to disabled (no CLI reload yet)")
+        except Exception as e:
+            if DEBUG:
+                print(f"[MagicLoader] Failed to deactivate {json_name}: {e}")
+            failed += 1
+    
+    return successful, failed
+
+
+def reload_ml_config(game_root: str | Path) -> Tuple[bool, str]:
+    """
+    Call MagicLoader CLI to reload configuration after bulk operations.
+    This should be called once after all JSON file movements are complete.
+    """
+    return _call_ml_cli(game_root, "reload")

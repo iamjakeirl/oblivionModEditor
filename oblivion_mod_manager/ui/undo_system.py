@@ -425,4 +425,241 @@ class FileOperationAction(UndoAction):
             self.refresh_callback()
             return True
         except Exception:
+            return False
+
+
+class LoadOrderAction(UndoAction):
+    """Action for ESP load order changes via drag-and-drop."""
+    
+    def __init__(self, old_order: list, new_order: list, 
+                 set_order_callback, refresh_callback):
+        # Create a concise description of the change
+        if len(old_order) != len(new_order):
+            super().__init__(f"Load Order Change ({len(old_order)} → {len(new_order)} mods)")
+        else:
+            # Find what moved
+            moved_items = []
+            for i, (old_item, new_item) in enumerate(zip(old_order, new_order)):
+                if old_item != new_item:
+                    moved_items.append(new_item)
+            
+            if moved_items:
+                if len(moved_items) == 1:
+                    super().__init__(f"Move '{moved_items[0]}'")
+                else:
+                    super().__init__(f"Reorder {len(moved_items)} mods")
+            else:
+                super().__init__("Load Order Change")
+        
+        self.old_order = old_order.copy()
+        self.new_order = new_order.copy()
+        self.set_order_callback = set_order_callback
+        self.refresh_callback = refresh_callback
+        self.executed = False
+        
+    def execute(self) -> bool:
+        """Apply new load order."""
+        try:
+            self.set_order_callback(self.new_order)
+            self.refresh_callback()
+            self.executed = True
+            return True
+        except Exception as e:
+            print(f"LoadOrderAction.execute() failed: {e}")
+            return False
+            
+    def undo(self) -> bool:
+        """Restore old load order."""
+        if not self.executed:
+            return False
+        try:
+            self.set_order_callback(self.old_order)
+            self.refresh_callback()
+            return True
+        except Exception as e:
+            print(f"LoadOrderAction.undo() failed: {e}")
+            return False
+
+
+class BulkToggleAction(UndoAction):
+    """Undo action for bulk enabling/disabling multiple mods at once."""
+    
+    def __init__(self, changes: list, tab_type: str, toggle_callback, refresh_callback):
+        """
+        Initialize bulk toggle action.
+        
+        Args:
+            changes: List of (mod_id, old_state, new_state) tuples
+            tab_type: Type of tab (ESP, PAK, etc.)
+            toggle_callback: Function to call for individual toggles
+            refresh_callback: Function to refresh the UI
+        """
+        self.changes = changes
+        self.tab_type = tab_type
+        self.toggle_callback = toggle_callback
+        self.refresh_callback = refresh_callback
+        
+        # Create description based on the changes
+        enable_count = sum(1 for _, _, new_state in changes if new_state)
+        disable_count = len(changes) - enable_count
+        
+        if enable_count > 0 and disable_count > 0:
+            self.description = f"Bulk Toggle {len(changes)} {tab_type} mods"
+        elif enable_count > 0:
+            self.description = f"Bulk Enable {enable_count} {tab_type} mods"
+        else:
+            self.description = f"Bulk Disable {disable_count} {tab_type} mods"
+    
+    def execute(self) -> bool:
+        """Execute the bulk toggle by applying all changes."""
+        try:
+            for mod_id, old_state, new_state in self.changes:
+                self.toggle_callback(mod_id, new_state)
+            self.refresh_callback()
+            self.executed = True
+            return True
+        except Exception as e:
+            print(f"BulkToggleAction.execute() failed: {e}")
+            return False
+    
+    def undo(self) -> bool:
+        """Undo the bulk toggle by reverting all changes."""
+        if not hasattr(self, 'executed') or not self.executed:
+            return False
+        try:
+            for mod_id, old_state, new_state in self.changes:
+                self.toggle_callback(mod_id, old_state)
+            self.refresh_callback()
+            self.executed = False
+            return True
+        except Exception as e:
+            print(f"BulkToggleAction.undo() failed: {e}")
+            return False
+
+
+class MagicLoaderBulkToggleAction(UndoAction):
+    """Special bulk action for MagicLoader that batches JSON file operations and calls CLI once."""
+    
+    def __init__(self, changes: list, game_path: str, refresh_callback):
+        """
+        Initialize MagicLoader bulk toggle action.
+        
+        Args:
+            changes: List of (mod_name, old_state, new_state) tuples
+            game_path: Path to the game directory
+            refresh_callback: Function to refresh the UI
+        """
+        self.changes = changes
+        self.game_path = game_path
+        self.refresh_callback = refresh_callback
+        
+        # Create description based on the changes
+        enable_count = sum(1 for _, _, new_state in changes if new_state)
+        disable_count = len(changes) - enable_count
+        
+        if enable_count > 0 and disable_count > 0:
+            self.description = f"Bulk Toggle {len(changes)} MagicLoader mods"
+        elif enable_count > 0:
+            self.description = f"Bulk Enable {enable_count} MagicLoader mods"
+        else:
+            self.description = f"Bulk Disable {disable_count} MagicLoader mods"
+    
+    def execute(self) -> bool:
+        """Execute the bulk toggle using batched operations."""
+        try:
+            from mod_manager.magicloader_installer import (
+                bulk_activate_ml_mods, bulk_deactivate_ml_mods, reload_ml_config
+            )
+            
+            # Separate changes into activate and deactivate lists
+            mods_to_activate = [mod_name for mod_name, old_state, new_state in self.changes if new_state]
+            mods_to_deactivate = [mod_name for mod_name, old_state, new_state in self.changes if not new_state]
+            
+            total_successful = 0
+            total_failed = 0
+            
+            # Batch activate mods (no CLI calls)
+            if mods_to_activate:
+                successful, failed = bulk_activate_ml_mods(self.game_path, mods_to_activate)
+                total_successful += successful
+                total_failed += failed
+                print(f"[MagicLoader] Bulk activated {successful}/{len(mods_to_activate)} mods")
+            
+            # Batch deactivate mods (no CLI calls)
+            if mods_to_deactivate:
+                successful, failed = bulk_deactivate_ml_mods(self.game_path, mods_to_deactivate)
+                total_successful += successful
+                total_failed += failed
+                print(f"[MagicLoader] Bulk deactivated {successful}/{len(mods_to_deactivate)} mods")
+            
+            # Now call CLI once to reload configuration
+            if total_successful > 0:
+                cli_success, cli_output = reload_ml_config(self.game_path)
+                if not cli_success:
+                    print(f"[MagicLoader] CLI reload failed: {cli_output}")
+                else:
+                    print(f"[MagicLoader] CLI reload successful: {cli_output}")
+            
+            # Refresh UI
+            self.refresh_callback()
+            
+            # Mark as executed if any operations succeeded
+            if total_successful > 0:
+                self.executed = True
+                return True
+            else:
+                print(f"[MagicLoader] All bulk operations failed ({total_failed} failures)")
+                return False
+                
+        except Exception as e:
+            print(f"MagicLoaderBulkToggleAction.execute() failed: {e}")
+            return False
+    
+    def undo(self) -> bool:
+        """Undo the bulk toggle by reverting all changes."""
+        if not hasattr(self, 'executed') or not self.executed:
+            return False
+            
+        try:
+            from mod_manager.magicloader_installer import (
+                bulk_activate_ml_mods, bulk_deactivate_ml_mods, reload_ml_config
+            )
+            
+            # Reverse the changes - swap old_state and new_state
+            mods_to_activate = [mod_name for mod_name, old_state, new_state in self.changes if old_state]
+            mods_to_deactivate = [mod_name for mod_name, old_state, new_state in self.changes if not old_state]
+            
+            total_successful = 0
+            total_failed = 0
+            
+            # Batch activate mods (revert to old enabled state)
+            if mods_to_activate:
+                successful, failed = bulk_activate_ml_mods(self.game_path, mods_to_activate)
+                total_successful += successful
+                total_failed += failed
+                print(f"[MagicLoader] Undo: Bulk activated {successful}/{len(mods_to_activate)} mods")
+            
+            # Batch deactivate mods (revert to old disabled state)
+            if mods_to_deactivate:
+                successful, failed = bulk_deactivate_ml_mods(self.game_path, mods_to_deactivate)
+                total_successful += successful
+                total_failed += failed
+                print(f"[MagicLoader] Undo: Bulk deactivated {successful}/{len(mods_to_deactivate)} mods")
+            
+            # Now call CLI once to reload configuration
+            if total_successful > 0:
+                cli_success, cli_output = reload_ml_config(self.game_path)
+                if not cli_success:
+                    print(f"[MagicLoader] Undo: CLI reload failed: {cli_output}")
+                else:
+                    print(f"[MagicLoader] Undo: CLI reload successful: {cli_output}")
+            
+            # Refresh UI
+            self.refresh_callback()
+            self.executed = False
+            
+            return total_successful > 0
+            
+        except Exception as e:
+            print(f"MagicLoaderBulkToggleAction.undo() failed: {e}")
             return False 

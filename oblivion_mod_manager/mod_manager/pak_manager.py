@@ -353,11 +353,13 @@ def deactivate_pak(game_path, pak_info):
                 pak.get("subfolder") == pak_info.get("subfolder")):
                 # Update the files list with new paths
                 pak["files"] = [target for _, target in moved_files]
+                # Update subfolder to reflect new location
+                pak["subfolder"] = pak_info.get("subfolder")
                 # Mark as disabled
                 pak["active"] = False
                 
                 # Remember if this was from LogicMods to restore correctly later
-                if subfolder and subfolder.startswith("LogicMods"):
+                if subfolder and ("LogicMods" in subfolder):
                     pak["from_logicmods"] = True
                 
                 break
@@ -456,7 +458,13 @@ def activate_pak(game_path, pak_info):
         if not target_dir:
             return False
             
-        if subfolder:
+        # Check if this should actually go to LogicMods based on metadata
+        if pak_info.get("from_logicmods", False) and not (subfolder and "LogicMods" in subfolder):
+            # This was originally from LogicMods but doesn't have LogicMods in subfolder
+            target_dir = os.path.join(paks_root, "LogicMods")
+            pak_info["subfolder"] = "LogicMods"
+            source_dir = disabled_dir
+        elif subfolder:
             source_dir = os.path.join(disabled_dir, subfolder)
             target_dir = os.path.join(target_dir, subfolder)
             os.makedirs(target_dir, exist_ok=True)
@@ -492,6 +500,8 @@ def activate_pak(game_path, pak_info):
                 pak.get("subfolder") == pak_info.get("subfolder")):
                 # Update the files list with new paths
                 pak["files"] = [target for _, target in moved_files]
+                # Update subfolder to reflect new location
+                pak["subfolder"] = pak_info.get("subfolder")
                 # Mark as active
                 pak["active"] = True
                 break
@@ -622,7 +632,7 @@ def scan_for_installed_paks(game_path):
 def reconcile_pak_list(game_path):
     """
     Reconcile the managed PAK list with what's actually installed.
-    Adds missing entries and removes entries for non-existent files.
+    Adds missing entries, removes entries for non-existent files, and updates entries with changed locations.
     Uses .pak files as the source of truth.
     
     Args:
@@ -643,46 +653,49 @@ def reconcile_pak_list(game_path):
         if pak.get("subfolder") == custom:
             pak["subfolder"] = None
     
-    # Create identifier tuples for comparison (name + subfolder + active status)
-    installed_ids = {(pak["name"], pak.get("subfolder"), pak.get("active", True)) for pak in installed_paks}
-    managed_ids = {(pak["name"], pak.get("subfolder"), pak.get("active", True)) for pak in managed_paks}
+    # Create lookups for easier comparison
+    # Key: pak name, Value: installed pak info
+    installed_by_name = {pak["name"]: pak for pak in installed_paks}
     
-    # Find PAKs to add (installed but not managed)
-    paks_to_add = installed_ids - managed_ids
+    # Key: pak name, Value: managed pak info  
+    managed_by_name = {pak["name"]: pak for pak in managed_paks}
     
-    # Find PAKs to remove (managed but not installed)
-    paks_to_remove = managed_ids - installed_ids
-    
-    # Make changes if needed
     changes_made = False
     
-    # Add missing PAKs
-    for pak_id in paks_to_add:
-        pak_name, subfolder, active = pak_id
-        for pak in installed_paks:
-            if (pak["name"] == pak_name and 
-                pak.get("subfolder") == subfolder and 
-                pak.get("active", True) == active):
-                managed_paks.append(pak)
+    # Update existing entries with changed locations or add new ones
+    for pak_name, installed_pak in installed_by_name.items():
+        if pak_name in managed_by_name:
+            managed_pak = managed_by_name[pak_name]
+            # Check if location or status has changed
+            if (managed_pak.get("subfolder") != installed_pak.get("subfolder") or 
+                managed_pak.get("active") != installed_pak.get("active")):
+                # Update the managed entry with new location/status
+                old_subfolder = managed_pak.get("subfolder", "None")
+                old_active = managed_pak.get("active", True)
+                managed_pak["subfolder"] = installed_pak["subfolder"]
+                managed_pak["active"] = installed_pak["active"]
+                managed_pak["files"] = installed_pak["files"]
+                # Preserve important metadata like from_logicmods if it exists
+                if installed_pak.get("subfolder") and "LogicMods" in installed_pak["subfolder"]:
+                    managed_pak["from_logicmods"] = True
                 changes_made = True
-                subfolder_info = f" in subfolder '{subfolder}'" if subfolder else ""
-                active_status = "active" if active else "disabled"
-                print(f"Added existing {active_status} PAK mod to list: {pak_name}{subfolder_info}")
-                break
-    
-    # Remove entries for non-existent PAKs
-    for i in range(len(managed_paks) - 1, -1, -1):
-        pak_id = (
-            managed_paks[i]["name"], 
-            managed_paks[i].get("subfolder"), 
-            managed_paks[i].get("active", True)
-        )
-        if pak_id in paks_to_remove:
-            subfolder_info = f" in subfolder '{managed_paks[i].get('subfolder')}'" if managed_paks[i].get("subfolder") else ""
-            active_status = "active" if managed_paks[i].get("active", True) else "disabled"
-            print(f"Removed non-existent {active_status} PAK mod from list: {managed_paks[i]['name']}{subfolder_info}")
-            managed_paks.pop(i)
+                new_subfolder = installed_pak.get("subfolder", "None")
+                new_active = installed_pak.get("active", True)
+                print(f"Updated PAK mod location: {pak_name} from {old_subfolder}({old_active}) to {new_subfolder}({new_active})")
+        else:
+            # Add new entry
+            managed_paks.append(installed_pak)
             changes_made = True
+            subfolder_info = f" in subfolder '{installed_pak.get('subfolder')}'" if installed_pak.get("subfolder") else ""
+            active_status = "active" if installed_pak.get("active", True) else "disabled"
+            print(f"Added existing {active_status} PAK mod to list: {pak_name}{subfolder_info}")
+    
+    # Remove entries for PAKs that no longer exist
+    managed_paks[:] = [pak for pak in managed_paks if pak["name"] in installed_by_name]
+    removed_count = len(managed_by_name) - len([pak for pak in managed_paks if pak["name"] in managed_by_name])
+    if removed_count > 0:
+        changes_made = True
+        print(f"Removed {removed_count} non-existent PAK mod(s) from list")
     
     # Save changes if any were made
     if changes_made:

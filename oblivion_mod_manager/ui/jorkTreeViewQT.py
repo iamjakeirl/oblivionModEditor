@@ -84,12 +84,20 @@ class ModTreeModel(QAbstractItemModel):
                 # Try normalized id (strip DisabledMods prefix)
                 import re
                 subfolder, name = row["id"].split("|", 1)
-                norm_subfolder = re.sub(r'^(DisabledMods[\\/]+)', '', subfolder, flags=re.IGNORECASE)
+                norm_subfolder = re.sub(r'^DisabledMods(?:[\\/]+|$)', '', subfolder, flags=re.IGNORECASE)
                 norm_id = f"{norm_subfolder}|{name}"
                 disp = get_display_info(norm_id)
                 if not disp.get("display") and not disp.get("group"):
-                    # Try just |name
-                    disp = get_display_info(f"|{name}")
+                    # If normalized to empty subfolder, try LogicMods (for deactivated LogicMods PAKs)
+                    if not norm_subfolder:
+                        logicmods_id = f"LogicMods|{name}"
+                        disp = get_display_info(logicmods_id)
+                        if not disp.get("group"):
+                            # Try just |name as final fallback
+                            disp = get_display_info(f"|{name}")
+                    else:
+                        # Try just |name
+                        disp = get_display_info(f"|{name}")
             if col == 0:
                 txt = disp.get("display", row["real"])
                 if self.show_real(): txt = row["real"]
@@ -119,11 +127,20 @@ class ModTreeModel(QAbstractItemModel):
             if not disp.get("group"):
                 import re
                 subfolder, name = r["id"].split("|", 1)
-                norm_subfolder = re.sub(r'^(DisabledMods[\\/]+)', '', subfolder, flags=re.IGNORECASE)
+                norm_subfolder = re.sub(r'^DisabledMods(?:[\\/]+|$)', '', subfolder, flags=re.IGNORECASE)
                 norm_id = f"{norm_subfolder}|{name}"
                 disp = get_display_info(norm_id)
                 if not disp.get("group"):
-                    disp = get_display_info(f"|{name}")
+                    # If normalized to empty subfolder, try LogicMods (for deactivated LogicMods PAKs)
+                    if not norm_subfolder:
+                        logicmods_id = f"LogicMods|{name}"
+                        disp = get_display_info(logicmods_id)
+                        if not disp.get("group"):
+                            # Try just |name as final fallback
+                            disp = get_display_info(f"|{name}")
+                    else:
+                        # Try just |name
+                        disp = get_display_info(f"|{name}")
             grp_chain = (disp.get("group", "") or "Ungrouped").split("/")
             parent = self.root
             path   = []

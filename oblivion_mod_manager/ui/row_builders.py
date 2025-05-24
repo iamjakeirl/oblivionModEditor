@@ -29,23 +29,27 @@ def rows_from_paks(pak_mods, display_cache, normalize_cb):
 def rows_from_esps(enabled, disabled):
     # return list[dict] mimicking rows_from_paks; group == "" for now
     # id format: f"|{esp_name}"
+    from mod_manager.utils import get_display_info
+    
     rows = []
     for esp in enabled:
+        display_info = get_display_info(esp)
         rows.append({
             "id": f"|{esp}",
             "real": esp,
-            "display": esp,
-            "group": "",
+            "display": display_info.get("display", esp),
+            "group": display_info.get("group", ""),
             "subfolder": None,
             "active": True,
             "esp_info": {"name": esp, "enabled": True},
         })
     for esp in disabled:
+        display_info = get_display_info(esp)
         rows.append({
             "id": f"|{esp}",
             "real": esp,
-            "display": esp,
-            "group": "",
+            "display": display_info.get("display", esp),
+            "group": display_info.get("group", ""),
             "subfolder": None,
             "active": False,
             "esp_info": {"name": esp, "enabled": False},
@@ -80,23 +84,29 @@ def rows_from_ue4ss(enabled, disabled):
 # MagicLoader JSON rows
 # ---------------------------------------------------------------------------
 def rows_from_magic(enabled, disabled):
+    # Similar to rows_from_esps - support display names and groups
+    # id format: f"|{mod_name}"
+    from mod_manager.utils import get_display_info
+    
     rows = []
     for mod in enabled:
+        display_info = get_display_info(f"|{mod}")
         rows.append({
             "id": f"|{mod}",
             "real": mod,
-            "display": mod,
-            "group": "",
+            "display": display_info.get("display", mod),
+            "group": display_info.get("group", ""),
             "subfolder": None,
             "active": True,
             "magic_info": {"name": mod, "enabled": True},
         })
     for mod in disabled:
+        display_info = get_display_info(f"|{mod}")
         rows.append({
             "id": f"|{mod}",
             "real": mod,
-            "display": mod,
-            "group": "",
+            "display": display_info.get("display", mod),
+            "group": display_info.get("group", ""),
             "subfolder": None,
             "active": False,
             "magic_info": {"name": mod, "enabled": False},

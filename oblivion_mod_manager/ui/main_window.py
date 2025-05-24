@@ -36,12 +36,11 @@ from pathlib import Path
 import zipfile
 import py7zr
 import rarfile
-from pyunpack import Archive
 import filecmp
 import subprocess  # ← will launch MagicLoader.exe
 
 # Note: rarfile library requires unrar executable to be installed on the system or in PATH
-# If not available, we'll fall back to pyunpack which uses whatever extractor is available
+# If not available, we'll handle RAR files as unsupported
 # See: https://rarfile.readthedocs.io/en/latest/
 
 EXAMPLE_PATH = r"C:\Games\OblivionRemastered"  # Example for user reference
@@ -81,7 +80,8 @@ from ui.jorkTreeBrowser import ModFilterProxy
 from mod_manager.magicloader_installer import (
     magicloader_installed, install_magicloader, uninstall_magicloader,
     reenable_magicloader, get_ml_mods_dir, list_ml_json_mods,
-    deactivate_ml_mod, activate_ml_mod, get_magicloader_dir, _target_ml_dir
+    deactivate_ml_mod, activate_ml_mod, get_magicloader_dir, _target_ml_dir,
+    bulk_activate_ml_mods, bulk_deactivate_ml_mods, reload_ml_config
 )
 from ui.row_builders import rows_from_magic
 # NEW: OBSE64 helpers
@@ -92,7 +92,7 @@ from mod_manager.obse64_installer import (
 )
 from ui.row_builders import rows_from_obse64_plugins
 # NEW: Undo system
-from ui.undo_system import UndoStack, UndoAction, ToggleModAction, RenameAction, GroupChangeAction, FileOperationAction, StateSnapshot, PakToggleAction
+from ui.undo_system import UndoStack, UndoAction, ToggleModAction, RenameAction, GroupChangeAction, FileOperationAction, StateSnapshot, PakToggleAction, LoadOrderAction, BulkToggleAction, MagicLoaderBulkToggleAction
 
 class PluginsListWidget(QListWidget):
     def __init__(self, *args, **kwargs):
@@ -104,11 +104,29 @@ class PluginsListWidget(QListWidget):
         self._drag_stylesheet = "QListWidget::item:hover { background: transparent; }"
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self._reorder_callback = None  # Callback for reorder events
+        self._undo_callback = None  # Callback for undo integration
+        self._pre_drag_order = []  # Store order before drag operation
 
     def set_reorder_callback(self, callback):
         self._reorder_callback = callback
+    
+    def set_undo_callback(self, callback):
+        """Set callback for undo integration. Signature: callback(old_order, new_order)"""
+        self._undo_callback = callback
+
+    def _get_current_order(self):
+        """Get current order of items in the list."""
+        order = []
+        for i in range(self.count()):
+            item = self.item(i)
+            if item:
+                order.append(item.text())
+        return order
 
     def startDrag(self, supportedActions):
+        # Capture the order before starting the drag
+        self._pre_drag_order = self._get_current_order()
+        
         self._drag_in_progress = True
         # Disable hover highlighting during drag
         self.setStyleSheet(self._drag_stylesheet)
@@ -131,7 +149,16 @@ class PluginsListWidget(QListWidget):
 
     def dropEvent(self, event):
         super().dropEvent(event)
-        # Call the reorder callback if set
+        
+        # Get the new order after the drop
+        new_order = self._get_current_order()
+        
+        # Check if the order actually changed
+        if self._pre_drag_order != new_order and self._undo_callback:
+            # Create undo action for the load order change
+            self._undo_callback(self._pre_drag_order, new_order)
+        
+        # Call the original reorder callback if set
         if self._reorder_callback:
             self._reorder_callback()
 
@@ -202,7 +229,7 @@ class MainWindow(QWidget):
         # Add drag-and-drop hint label
         self.drag_drop_layout = QHBoxLayout()
         self.layout.addLayout(self.drag_drop_layout)
-        self.drag_drop_label = QLabel("Tip: You can drag and drop .zip or .7z archives onto this window to install mods. <b>RAR files are 50/50 and may need to be installed manually.</b>")
+        self.drag_drop_label = QLabel("Tip: You can drag and drop .zip or .7z archives onto this window to install mods. <b>RAR files are not supported - please extract manually.</b>")
         self.drag_drop_label.setStyleSheet("color: #888888; font-style: italic;")
         self.drag_drop_label.setAlignment(Qt.AlignCenter)
         self.drag_drop_layout.addWidget(self.drag_drop_label)
@@ -281,35 +308,13 @@ class MainWindow(QWidget):
             }
         """)
 
-        # Create a container for the checkbox with fixed width
-        checkbox_container = QWidget()
-        checkbox_container.setFixedWidth(360)  # Increased width by 20%
-        checkbox_layout = QHBoxLayout(checkbox_container)
-        checkbox_layout.setContentsMargins(0, 0, 5, 0)  # Keep left margin at 0
-        checkbox_layout.setSpacing(25)  # Increased spacing between checkboxes
-        checkbox_layout.setAlignment(Qt.AlignLeft)  # Align contents to the left
-        
-        # Checkbox in its container with more minimum width
+        # Left side: Hide Default ESPs checkbox
         self.hide_stock_checkbox = QCheckBox("Hide Default ESPs")
         self.hide_stock_checkbox.setChecked(True)
         self.hide_stock_checkbox.stateChanged.connect(self.refresh_lists)
-        self.hide_stock_checkbox.setMinimumWidth(140)  # Set minimum width
-        checkbox_layout.addWidget(self.hide_stock_checkbox)
+        self.hide_stock_checkbox.setMinimumWidth(150)
+        enabled_header_layout.addWidget(self.hide_stock_checkbox, 0, Qt.AlignLeft | Qt.AlignVCenter)
 
-        # Add Load‑Order checkbox with more minimum width
-        self.load_order_mode = QCheckBox("Load‑order mode")
-        self.load_order_mode.setChecked(False)
-        self.load_order_mode.toggled.connect(self._esp_toggle_layout)
-        self.load_order_mode.setMinimumWidth(140)  # Set minimum width
-        checkbox_layout.addWidget(self.load_order_mode)
-
-        # Add empty widget with same width as checkbox container for balance
-        spacer_widget = QWidget()
-        spacer_widget.setFixedWidth(360)  # Match checkbox container width
-
-        # Add widgets to main layout
-        enabled_header_layout.addWidget(spacer_widget)
-        
         # Centered label (no frame/border)
         self.enabled_mods_label = QLabel("Enabled Mods (double-click to disable, drag to reorder):")
         self.enabled_mods_label.setStyleSheet("font-weight: bold; color: #ff9800; border: none; background: transparent;")
@@ -317,8 +322,29 @@ class MainWindow(QWidget):
         self.enabled_mods_label.setFrameStyle(QFrame.NoFrame)
         enabled_header_layout.addWidget(self.enabled_mods_label, 1, Qt.AlignCenter)
 
-        # Add checkbox container with explicit alignment
-        enabled_header_layout.addWidget(checkbox_container, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        # Right side: Container for Load-order mode and Preserve Load Order checkboxes
+        right_checkbox_container = QWidget()
+        right_checkbox_container.setFixedWidth(370)  # Increased width for full text visibility
+        right_checkbox_layout = QHBoxLayout(right_checkbox_container)
+        right_checkbox_layout.setContentsMargins(5, 0, 0, 0)
+        right_checkbox_layout.setSpacing(15)
+        right_checkbox_layout.setAlignment(Qt.AlignRight)
+
+        # Add Load‑Order checkbox
+        self.load_order_mode = QCheckBox("Load‑order mode")
+        self.load_order_mode.setChecked(False)
+        self.load_order_mode.toggled.connect(self._esp_toggle_layout)
+        self.load_order_mode.setMinimumWidth(140)  # Increased for full text
+        right_checkbox_layout.addWidget(self.load_order_mode)
+        
+        # Add Preserve Load Order checkbox
+        self.preserve_load_order = QCheckBox("Preserve Load Order")
+        self.preserve_load_order.setChecked(True)  # Default to ON for better UX
+        self.preserve_load_order.setMinimumWidth(150)  # Increased for full text
+        right_checkbox_layout.addWidget(self.preserve_load_order)
+
+        # Add the right checkbox container to the main layout
+        enabled_header_layout.addWidget(right_checkbox_container, 0, Qt.AlignRight | Qt.AlignVCenter)
 
         # Add the header frame to the main layout
         self.esp_layout.addWidget(self.enabled_header)
@@ -339,6 +365,7 @@ class MainWindow(QWidget):
         self.enabled_mods_list  = PluginsListWidget()
         self.enabled_mods_list.setDragDropMode(QAbstractItemView.InternalMove)
         self.enabled_mods_list.set_reorder_callback(self.update_plugins_txt_from_enabled_list)
+        self.enabled_mods_list.set_undo_callback(self._load_order_changed_with_undo)
         # Add them to layout but keep invisible
         self.esp_layout.addWidget(self.disabled_mods_list)
         self.esp_layout.addWidget(self.enabled_mods_list)
@@ -380,6 +407,25 @@ QTreeView::item:selected {
 
         self.esp_enabled_view.set_delete_callback(_delete_esp_rows)
         self.esp_disabled_view.set_delete_callback(_delete_esp_rows)
+
+        # Override ESP context menus to support bulk enable/disable operations
+        self.esp_enabled_view.customContextMenuRequested.disconnect()
+        self.esp_disabled_view.customContextMenuRequested.disconnect()
+        self.esp_enabled_view.customContextMenuRequested.connect(
+            lambda pos: self._show_esp_context_menu(pos, True))
+        self.esp_disabled_view.customContextMenuRequested.connect(
+            lambda pos: self._show_esp_context_menu(pos, False))
+
+        # Add keyboard shortcuts for ESP bulk operations - QKeySequence already imported at top
+        from PyQt5.QtWidgets import QShortcut
+        
+        # Ctrl+E: Enable selected ESPs
+        enable_shortcut = QShortcut(QKeySequence("Ctrl+E"), self.esp_frame)
+        enable_shortcut.activated.connect(self._enable_selected_esps)
+        
+        # Ctrl+D: Disable selected ESPs  
+        disable_shortcut = QShortcut(QKeySequence("Ctrl+D"), self.esp_frame)
+        disable_shortcut.activated.connect(self._disable_selected_esps)
 
         # Bottom buttons in a horizontal layout
         self.button_row = QHBoxLayout()
@@ -481,6 +527,25 @@ QTreeView::item:selected {
 
         self.chk_real_magic.toggled.connect(self.magic_enabled_view._model.layoutChanged.emit)
         self.chk_real_magic.toggled.connect(self.magic_disabled_view._model.layoutChanged.emit)
+
+        # Attach delete-callback for MagicLoader ModTreeBrowsers
+        def _delete_magic_rows(rows):
+            for rd in rows:
+                try:
+                    self._remove_magic_mod(rd["real"])
+                except Exception as e:
+                    print(f"[MAGIC-DEL] error: {e}")
+
+        self.magic_enabled_view.set_delete_callback(_delete_magic_rows)
+        self.magic_disabled_view.set_delete_callback(_delete_magic_rows)
+
+        # Override MagicLoader context menus to avoid conflicts with generic context menu
+        self.magic_enabled_view.customContextMenuRequested.disconnect()
+        self.magic_disabled_view.customContextMenuRequested.disconnect()
+        self.magic_enabled_view.customContextMenuRequested.connect(
+            lambda pos: self._show_magic_context_menu(pos, True))
+        self.magic_disabled_view.customContextMenuRequested.connect(
+            lambda pos: self._show_magic_context_menu(pos, False))
 
         # Apply consistent tree styling as in PAK tab
         tree_stylesheet = """
@@ -1135,8 +1200,12 @@ QTreeView::item:selected {
                 with zipfile.ZipFile(archive_path, 'r') as zip_ref:
                     zip_ref.extractall(extract_dir)
             elif ext == '.7z':
-                with py7zr.SevenZipFile(archive_path, mode='r') as z:
-                    z.extractall(extract_dir)
+                try:
+                    with py7zr.SevenZipFile(archive_path, mode='r') as z:
+                        z.extractall(extract_dir)
+                except Exception as e:
+                    # If py7zr fails (e.g., unsupported compression like bcj2), suggest manual extraction
+                    raise Exception(f"Unsupported 7z compression format. Please extract manually and drag the loose files onto the window.")
             elif ext == '.rar':
                 # Try using rarfile first
                 try:
@@ -1151,12 +1220,8 @@ QTreeView::item:selected {
                     with rarfile.RarFile(archive_path) as rf:
                         rf.extractall(extract_dir)
                 except (rarfile.RarCannotExec, rarfile.RarExecError, rarfile.Error, Exception) as e:
-                    # If rarfile fails (likely due to missing unrar), try pyunpack
-                    print(f"Rarfile extraction failed: {str(e)}. Falling back to pyunpack.")
-                    try:
-                        Archive(archive_path).extractall(extract_dir)
-                    except Exception as inner_e:
-                        raise Exception(f"Failed to extract RAR using both methods: {str(e)}, then: {str(inner_e)}")
+                    # If rarfile fails, suggest manual extraction
+                    raise Exception(f"RAR extraction failed (likely missing unrar tool). Please extract manually and drag the loose files onto the window.")
             
             return extract_dir
         except Exception as e:
@@ -1172,7 +1237,7 @@ QTreeView::item:selected {
             force_subfolder: If provided, use this as the subfolder for all PAKs
         """
         # --- ~mods and LogicMods merge logic ---
-        from mod_manager.pak_manager import get_paks_root_dir, ensure_paks_structure
+        from mod_manager.pak_manager import get_paks_root_dir, ensure_paks_structure, reconcile_pak_list
         ensure_paks_structure(self.game_path)
         paks_root = get_paks_root_dir(self.game_path)
         # Merge ~mods from archive if present
@@ -1187,13 +1252,19 @@ QTreeView::item:selected {
             if os.path.basename(root).lower() == "logicmods":
                 logicmods_dirs.append(root)
 
+        logicmods_merged = False
         for logicmods_src in logicmods_dirs:
             logicmods_dest = os.path.join(paks_root, "LogicMods")
             _merge_tree(logicmods_src, logicmods_dest)
+            logicmods_merged = True
             self.show_status(
                 f"Merged LogicMods from archive into {logicmods_dest}.",
                 5000, "success"
             )
+        
+        # Reconcile PAK list after LogicMods merge to update metadata
+        if logicmods_merged:
+            reconcile_pak_list(self.game_path)
         # --- End ~mods and LogicMods merge logic ---
         
         # Find ESP and PAK files in the extracted content, skipping ~mods and LogicMods
@@ -1349,6 +1420,32 @@ QTreeView::item:selected {
                     installed_shared += 1
         # --- End UE4SS mod install ---
         
+        # --- OBSE64 detection for loose files ---
+        obse64_files = []
+        for root, _, files in os.walk(extract_dir):
+            for file in files:
+                file_lower = file.lower()
+                # Look for required OBSE64 files: obse64_loader.exe and obse64_*.dll
+                if file_lower == "obse64_loader.exe" or (file_lower.startswith("obse64_") and file_lower.endswith(".dll")):
+                    obse64_files.append(os.path.join(root, file))
+
+        installed_obse64 = 0
+        if obse64_files:
+            # Validate required files
+            has_loader = any(os.path.basename(f).lower() == "obse64_loader.exe" for f in obse64_files)
+            if not has_loader:
+                self.show_status("OBSE64 files found but missing obse64_loader.exe", 8000, "error")
+            else:
+                # Install OBSE64 from loose files
+                success, message = self._install_obse64_from_loose_files(obse64_files)
+                if success:
+                    installed_obse64 = len(obse64_files)
+                    self.show_status(f"OBSE64 installed successfully: {message}", 8000, "success")
+                    self._refresh_obse64_status()
+                else:
+                    self.show_status(f"OBSE64 installation failed: {message}", 8000, "error")
+        # --- End OBSE64 detection ---
+        
         # --- MagicLoader folder detection (archive may bundle MagicLoader/...) ----
         magic_dirs = []
         for root, dirs, _ in os.walk(extract_dir):
@@ -1398,6 +1495,8 @@ QTreeView::item:selected {
             summary_parts.append(f"{installed_ue4ss} UE4SS mod(s)")
         if installed_shared > 0:
             summary_parts.append(f"{installed_shared} UE4SS shared resource(s)")
+        if installed_obse64 > 0:
+            summary_parts.append(f"{installed_obse64} OBSE64 file(s)")
         if installed_ml:
             summary_parts.append("MagicLoader")
             
@@ -1577,6 +1676,14 @@ QTreeView::item:selected {
             self.path_input.setText(self.game_path)
             # Lock the field to prevent accidental edits (use Browse to change)
             self.path_input.setReadOnly(True)
+        
+        # Load preserve load order setting
+        settings = load_settings()
+        preserve_setting = settings.get('preserve_load_order', True)  # Default to True
+        self.preserve_load_order.setChecked(preserve_setting)
+        
+        # Connect preserve load order checkbox to save settings
+        self.preserve_load_order.stateChanged.connect(self._save_preserve_load_order_setting)
 
     def refresh_lists(self):
         # short‑circuit when load‑order mode is active
@@ -1651,6 +1758,13 @@ QTreeView::item:selected {
         self.refresh_lists()
 
     def revert_to_default_order(self):
+        # Capture current order for undo support
+        current_order = []
+        for i in range(self.enabled_mods_list.count()):
+            item = self.enabled_mods_list.item(i)
+            if item:
+                current_order.append(item.text())
+        
         # Always restore the full default load order
         new_plugins = DEFAULT_LOAD_ORDER.copy()
         # Find extras in the current UI list (not in default, not excluded, not empty)
@@ -1658,9 +1772,21 @@ QTreeView::item:selected {
         extras = [p for p in current_plugins if p and p not in DEFAULT_LOAD_ORDER]
         for extra in extras:
             new_plugins.append(f'#{extra}')
+        
         # Write to plugins.txt
         if write_plugins_txt(new_plugins):
             self.show_status("Load order reverted to default. User mods disabled.", 5000, "success")
+            
+            # Create undo action for the revert operation
+            if current_order != new_plugins:  # Only create undo if order actually changed
+                action = LoadOrderAction(
+                    current_order, new_plugins,
+                    self._set_load_order_from_list,
+                    self._populate_flat_lists
+                )
+                # Execute the action (since we already applied the change, just mark as executed)
+                action.executed = True
+                self.undo_stack.push(action)
         else:
             self.show_status("Error: Failed to revert load order.", 5000, "error")
         self.refresh_lists()
@@ -1805,6 +1931,20 @@ QTreeView::item:selected {
         self.active_pak_view.set_delete_callback(_delete_pak_rows)
         self.inactive_pak_view.set_delete_callback(_delete_pak_rows)
 
+        # Connect context menus for PAK views 
+        # Disconnect any existing connections first
+        try:
+            self.active_pak_view.customContextMenuRequested.disconnect()
+            self.inactive_pak_view.customContextMenuRequested.disconnect()
+        except Exception:
+            pass
+        
+        # Connect to our PAK context menu handler
+        self.active_pak_view.customContextMenuRequested.connect(
+            lambda pos: self._show_pak_view_context_menu(pos, True))
+        self.inactive_pak_view.customContextMenuRequested.connect(
+            lambda pos: self._show_pak_view_context_menu(pos, False))
+
         # DEBUG: Print cache keys and first 5 disabled row ids
         print("_display_cache keys:", list(cache.keys()))
         print("disabled_rows ids:", [r['id'] for r in disabled_rows][:5])
@@ -1884,90 +2024,211 @@ QTreeView::item:selected {
 
         node = src_index.internalPointer()            # our custom _Node
 
-        # Skip group headers (optional)
-        if getattr(node, "is_group", False):
+        if not node:
             return
 
-        # Extract data for the selected mod
-        mod_data = node.data          # dict with 'id', 'pak_info', …
-        mod_id   = mod_data["id"]
-        pak_info = mod_data["pak_info"]
+        from PyQt5.QtWidgets import QMenu, QAction, QInputDialog, QMessageBox
 
-        # ---------- build and show context menu ----------
-        from PyQt5.QtWidgets import QMenu, QInputDialog, QMessageBox
-        context_menu = QMenu(self)
+        # ========== GROUP HEADER CONTEXT MENU ==========
+        if getattr(node, "is_group", False):
+            group_name = node.data
+            context_menu = QMenu(self)
+            
+            # Group rename action
+            rename_group_action = context_menu.addAction("Rename Group")
+            context_menu.addSeparator()
+            
+            # Group enable/disable actions - show appropriate action based on view
+            if enabled:
+                # In enabled view, offer deactivate action for the group
+                deactivate_group_action = context_menu.addAction(f"Deactivate All in '{group_name}'")
+                group_action = deactivate_group_action
+            else:
+                # In disabled view, offer activate action for the group
+                activate_group_action = context_menu.addAction(f"Activate All in '{group_name}'")
+                group_action = activate_group_action
+            
+            action = context_menu.exec_(view.viewport().mapToGlobal(pos))
+            
+            if action == rename_group_action:
+                # Handle group rename
+                text, ok = QInputDialog.getText(
+                    self, "Rename Group", "Group Name:", text=group_name
+                )
+                if ok and text.strip():
+                    new_group = text.strip()
+                    # Update all PAK mods in this group to the new group name
+                    paks_in_group = self._get_paks_in_group(group_name)
+                    from mod_manager.utils import set_display_info
+                    for pak_id in paks_in_group:
+                        set_display_info(pak_id, group=new_group)
+                    self._load_pak_list()
+                    self.show_status(f"Renamed group '{group_name}' to '{new_group}'.", 4000, "success")
+                    
+            elif action == group_action:
+                # Handle the appropriate group action based on which view we're in
+                if enabled:
+                    self._bulk_deactivate_pak_group(group_name)
+                else:
+                    self._bulk_activate_pak_group(group_name)
+                
+            return
+
+        # ========== INDIVIDUAL PAK CONTEXT MENU ==========
+        # Get all selected items (including the clicked one if not selected)
         sel_indexes = view.selectionModel().selectedRows()
-        many = len(sel_indexes) > 1
-        rename_action = None if many else context_menu.addAction("Rename Display Name…")
-        group_action  = context_menu.addAction("Set Group…" + (" (bulk)" if many else ""))
-        delete_action = context_menu.addAction("Delete PAK Mod")
+        if src_index not in [view_model.mapToSource(i) if isinstance(view_model, QSortFilterProxyModel) else i for i in sel_indexes]:
+            sel_indexes.append(index)
+
+        # Build list of PAK IDs from selected leaf nodes
+        pak_ids = []
+        for idx in sel_indexes:
+            src_index = view_model.mapToSource(idx) if isinstance(view_model, QSortFilterProxyModel) else idx
+            n = src_index.internalPointer()
+            if n and not getattr(n, "is_group", False):
+                pak_ids.append(n.data["id"])
+
+        if not pak_ids:
+            return  # No valid PAKs selected
+
+        many = len(pak_ids) > 1
+        context_menu = QMenu(self)
+        
+        # Enable/Disable actions
+        if enabled:
+            # In enabled view, offer deactivate action
+            deactivate_action = context_menu.addAction(
+                f"Deactivate Selected PAK{'s' if many else ''} ({len(pak_ids)})" if many 
+                else f"Deactivate {pak_ids[0].split('|')[-1]}"
+            )
+        else:
+            # In disabled view, offer activate action
+            activate_action = context_menu.addAction(
+                f"Activate Selected PAK{'s' if many else ''} ({len(pak_ids)})" if many 
+                else f"Activate {pak_ids[0].split('|')[-1]}"
+            )
+        
+        context_menu.addSeparator()
+        
+        # Standard actions (only for single selection)
+        rename_action = None
+        if not many:
+            rename_action = context_menu.addAction("Rename Display Name…")
+            
+        group_action = context_menu.addAction("Set Group…" + (" (bulk)" if many else ""))
+        delete_action = context_menu.addAction("Delete PAK Mod" + ("s" if many else ""))
+        
         action = context_menu.exec_(view.viewport().mapToGlobal(pos))
-        # (The remaining logic is unchanged; just replace every
-        #  previous occurrence of 'proxy._rows[row]' / 'table' with
-        #  the new local variables mod_data / view.)
-        if action == rename_action:
+        
+        # Handle actions
+        if enabled and action == deactivate_action:
+            self._bulk_toggle_paks_with_undo(pak_ids, False)
+            
+        elif not enabled and action == activate_action:
+            self._bulk_toggle_paks_with_undo(pak_ids, True)
+            
+        elif action == rename_action and not many:
+            # Handle single PAK rename
+            pak_id = pak_ids[0]
             from mod_manager.utils import get_display_info, set_display_info
-            # default text = real file name
-            current_text = mod_data["real"]
+            current_text = get_display_info(pak_id).get("display", pak_id.split('|')[-1])
+            
             text, ok = QInputDialog.getText(
                 self, "Rename Display Name", "Display Name:", text=current_text
             )
-            if not ok:
-                return
-            new_name = text.strip()
-            if not new_name:
-                QMessageBox.warning(self, "Invalid Name", "Display name cannot be blank.")
-                return
+            if ok and text.strip():
+                new_name = text.strip()
+                if new_name != current_text:
+                    # Build set of existing display names (to avoid duplicates)
+                    existing = {
+                        get_display_info(leaf.data["id"]).get("display", leaf.data["real"]).strip().lower()
+                        for leaf in _iter_leaf_nodes(model.root)
+                        if isinstance(leaf.data, dict) and "id" in leaf.data
+                    }
+                    existing.discard(current_text.strip().lower())
 
-            # build set of existing display names (to avoid duplicates)
-            existing = {
-                get_display_info(leaf.data["id"]).get("display", leaf.data["real"]).strip().lower()
-                for leaf in _iter_leaf_nodes(model.root)
-                if isinstance(leaf.data, dict) and "id" in leaf.data
-            }
-            existing.discard(current_text.strip().lower())
+                    if new_name.lower() in existing:
+                        QMessageBox.warning(self, "Duplicate Name",
+                                            "That display name is already used by another mod.")
+                        return
 
-            if new_name.lower() in existing:
-                QMessageBox.warning(self, "Duplicate Name",
-                                    "That display name is already used by another mod.")
-                return
-
-            set_display_info(mod_id, display=new_name)
-            self._load_pak_list()         # refresh view
-            return
-
+                    set_display_info(pak_id, display=new_name)
+                    self._load_pak_list()
+                    self.show_status(f"Renamed PAK display name to '{new_name}'.", 4000, "success")
+                    
         elif action == group_action:
+            # Handle group assignment (bulk or single)
             from mod_manager.utils import get_display_info, set_display_info, set_display_info_bulk
-            # For bulk, use first selected's group as default
-            if many:
-                first_index = sel_indexes[0]
-                src_index = view.model().mapToSource(first_index) if isinstance(view.model(), QSortFilterProxyModel) else first_index
-                node = src_index.internalPointer()
-                mod_id = node.data["id"]
-            current_group = get_display_info(mod_id).get("group", "")
+            first_pak_id = pak_ids[0]
+            current_group = get_display_info(first_pak_id).get("group", "")
+            
             text, ok = QInputDialog.getText(
                 self, "Set Group", "Group:", text=current_group
             )
-            if not ok:
-                return
-            group_val = text.strip()
-            if many:
-                # Set group for all selected using bulk helper
-                changes = []
-                for idx in sel_indexes:
-                    src_index = view.model().mapToSource(idx) if isinstance(view.model(), QSortFilterProxyModel) else idx
-                    node = src_index.internalPointer()
-                    if not getattr(node, "is_group", False):
-                        changes.append((node.data["id"], group_val))
-                set_display_info_bulk(changes)
-            else:
-                set_display_info(mod_id, group=group_val)
-            self._load_pak_list()
-            return
-
+            if ok:
+                group_val = text.strip()
+                if many:
+                    # Bulk group change
+                    changes = [(pak_id, group_val) for pak_id in pak_ids]
+                    set_display_info_bulk(changes)
+                    self.show_status(f"Set group for {len(pak_ids)} PAK mods to '{group_val}'.", 4000, "success")
+                else:
+                    # Single group change
+                    set_display_info(first_pak_id, group=group_val)
+                    self.show_status(f"Set group for '{first_pak_id.split('|')[-1]}' to '{group_val}'.", 4000, "success")
+                self._load_pak_list()
+                
         elif action == delete_action:
-            self.delete_pak_mod(pak_info)
-            return
+            # Handle delete (bulk or single)
+            if many:
+                # Get pak_info objects for all selected PAKs
+                pak_infos = []
+                for pak_id in pak_ids:
+                    # Find the pak_info for each pak_id
+                    from mod_manager.pak_manager import list_managed_paks
+                    all_paks = list_managed_paks()
+                    for pak in all_paks:
+                        pak_subfolder = pak.get('subfolder', '') or ''
+                        reconstructed_id = f"{pak_subfolder}|{pak['name']}"
+                        if reconstructed_id == pak_id:
+                            pak_infos.append(pak)
+                            break
+                
+                reply = QMessageBox.question(
+                    self,
+                    "Confirm Deletion",
+                    f"Are you sure you want to permanently delete {len(pak_infos)} PAK mods?\n\n" +
+                    "\n".join([pak['name'] for pak in pak_infos[:5]]) + ("..." if len(pak_infos) > 5 else ""),
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                
+                if reply == QMessageBox.Yes:
+                    deleted_count = 0
+                    for pak_info in pak_infos:
+                        try:
+                            self.delete_pak_mod(pak_info)
+                            deleted_count += 1
+                        except Exception as e:
+                            print(f"[PAK-DEL] Failed to delete {pak_info['name']}: {e}")
+                    
+                    if deleted_count > 0:
+                        self.show_status(f"Deleted {deleted_count} PAK mod{'s' if deleted_count != 1 else ''}.", 4000, "success")
+            else:
+                # Single PAK delete - get pak_info and call existing delete method
+                pak_id = pak_ids[0]
+                from mod_manager.pak_manager import list_managed_paks
+                all_paks = list_managed_paks()
+                pak_info = None
+                for pak in all_paks:
+                    pak_subfolder = pak.get('subfolder', '') or ''
+                    reconstructed_id = f"{pak_subfolder}|{pak['name']}"
+                    if reconstructed_id == pak_id:
+                        pak_info = pak
+                        break
+                
+                if pak_info:
+                    self.delete_pak_mod(pak_info)
 
     def delete_pak_mod(self, pak_info):
         from PyQt5.QtWidgets import QMessageBox
@@ -2562,12 +2823,13 @@ QTreeView::item:selected {
             self.esp_layout.removeWidget(w)
             w.setParent(None)
         # Re-add in correct order for the mode
+        # Note: positions 0 and 1 are already occupied by checkbox and search bar
         if on:
             # Load order mode: header, list, header, list
-            self.esp_layout.insertWidget(0, self.disabled_mods_label)
-            self.esp_layout.insertWidget(1, self.disabled_mods_list)
-            self.esp_layout.insertWidget(2, self.enabled_header)
-            self.esp_layout.insertWidget(3, self.enabled_mods_list)
+            self.esp_layout.insertWidget(2, self.disabled_mods_label)
+            self.esp_layout.insertWidget(3, self.disabled_mods_list)
+            self.esp_layout.insertWidget(4, self.enabled_header)
+            self.esp_layout.insertWidget(5, self.enabled_mods_list)
             self.disabled_mods_list.show()
             self.enabled_mods_list.show()
             self.esp_disabled_view.hide()
@@ -2575,10 +2837,10 @@ QTreeView::item:selected {
             self._populate_flat_lists()
         else:
             # Tree mode: header, tree, header, tree
-            self.esp_layout.insertWidget(0, self.disabled_mods_label)
-            self.esp_layout.insertWidget(1, self.esp_disabled_view)
-            self.esp_layout.insertWidget(2, self.enabled_header)
-            self.esp_layout.insertWidget(3, self.esp_enabled_view)
+            self.esp_layout.insertWidget(2, self.disabled_mods_label)
+            self.esp_layout.insertWidget(3, self.esp_disabled_view)
+            self.esp_layout.insertWidget(4, self.enabled_header)
+            self.esp_layout.insertWidget(5, self.esp_enabled_view)
             self.disabled_mods_list.hide()
             self.enabled_mods_list.hide()
             self.esp_disabled_view.show()
@@ -2616,8 +2878,27 @@ QTreeView::item:selected {
 
     def _esp_set_enabled(self, esp_name: str, enabled: bool):
         plugins = read_plugins_txt()
-        plugins = [p for p in plugins if p.lstrip('#').strip() != esp_name]
-        plugins.append(esp_name if enabled else f'#{esp_name}')
+        
+        # Check if preserve load order is enabled
+        if self.preserve_load_order.isChecked():
+            # Preserve load order mode: modify in-place if ESP exists
+            esp_found = False
+            for i, line in enumerate(plugins):
+                clean_name = line.lstrip('#').strip()
+                if clean_name == esp_name:
+                    # Found ESP, modify in-place
+                    plugins[i] = esp_name if enabled else f'#{esp_name}'
+                    esp_found = True
+                    break
+            
+            # If ESP not found in plugins.txt, add at end
+            if not esp_found:
+                plugins.append(esp_name if enabled else f'#{esp_name}')
+        else:
+            # Legacy mode: remove and append (current behavior)
+            plugins = [p for p in plugins if p.lstrip('#').strip() != esp_name]
+            plugins.append(esp_name if enabled else f'#{esp_name}')
+        
         write_plugins_txt(plugins)
 
     def _activate_esp_row(self, index):
@@ -2914,8 +3195,12 @@ QTreeView::item:selected {
             if disabled_dir.exists() and any(disabled_dir.glob("obse64_*")):
                 self._reenable_obse64()
             else:
-                # Need to browse for archive
-                self.show_status("Use 'Browse Archive' button to select OBSE64 archive for installation.", 6000, "info")
+                # Show manual installation instructions instead of status message
+                dialog = OBSE64ManualInstallDialog(self)
+                result = dialog.exec_()
+                
+                if result == QDialog.Accepted and dialog.result_browse:
+                    self._browse_obse64_archive()
 
     def _browse_obse64_archive(self):
         """Browse for OBSE64 archive and install it."""
@@ -2923,7 +3208,7 @@ QTreeView::item:selected {
             self.show_status("Set game path first.", 6000, "error")
             return
         
-        # Check Steam restriction
+        # Check Steam restriction first
         from mod_manager.utils import get_install_type
         install_type = get_install_type()
         if install_type != "steam":
@@ -2938,18 +3223,22 @@ QTreeView::item:selected {
             )
             return
         
-        # Browse for archive
-        archive_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select OBSE64 Archive",
-            "",
-            "Archive Files (*.zip *.7z *.rar);;All Files (*)"
-        )
+        # Show manual installation instructions
+        dialog = OBSE64ManualInstallDialog(self)
+        result = dialog.exec_()
         
-        if not archive_path:
-            return
-        
-        self._install_obse64_archive(archive_path)
+        if result == QDialog.Accepted and dialog.result_browse:
+            # User chose to continue to browse
+            archive_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select OBSE64 Archive (Note: bcj2 archives may require manual extraction)",
+                "",
+                "Archive Files (*.zip *.7z *.rar);;All Files (*)"
+            )
+            
+            if archive_path:
+                self._install_obse64_archive(archive_path)
+        # If rejected or cancel, do nothing
 
     def _install_obse64_archive(self, archive_path):
         """Install OBSE64 from the given archive path."""
@@ -3185,7 +3474,104 @@ QTreeView::item:selected {
             toggle_callback, self.refresh_lists
         )
         self._execute_with_undo(action)
+
+    def _bulk_toggle_esps_with_undo(self, esp_names: list, enable: bool):
+        """Bulk toggle multiple ESP mods with undo support."""
+        if not esp_names:
+            return
+            
+        # Get current states for all ESPs
+        plugins_lines = read_plugins_txt()
+        esp_states = {}
         
+        # Build current state map
+        for line in plugins_lines:
+            clean_name = line.lstrip('#').strip()
+            if clean_name in esp_names:
+                esp_states[clean_name] = not line.startswith('#')  # enabled if not commented
+        
+        # ESPs not in plugins.txt are considered disabled
+        for esp_name in esp_names:
+            if esp_name not in esp_states:
+                esp_states[esp_name] = False
+        
+        # Build list of changes needed
+        changes = []
+        for esp_name in esp_names:
+            current_state = esp_states[esp_name]
+            if current_state != enable:
+                changes.append((esp_name, current_state, enable))
+        
+        if not changes:
+            # All ESPs already in desired state
+            action_word = "enabled" if enable else "disabled"
+            self.show_status(f"All selected ESPs are already {action_word}.", 3000, "info")
+            return
+        
+        # Create bulk toggle action
+        def toggle_callback(mod_id, new_state):
+            self._esp_set_enabled(mod_id, new_state)
+            
+        action = BulkToggleAction(
+            changes, "ESP", toggle_callback, self.refresh_lists
+        )
+        
+        if self._execute_with_undo(action):
+            # Show success message
+            enable_count = sum(1 for _, _, new_state in changes if new_state)
+            disable_count = len(changes) - enable_count
+            
+            if enable_count > 0 and disable_count > 0:
+                self.show_status(f"Toggled {len(changes)} ESP mods.", 4000, "success")
+            elif enable_count > 0:
+                self.show_status(f"Enabled {enable_count} ESP mods.", 4000, "success")
+            else:
+                self.show_status(f"Disabled {disable_count} ESP mods.", 4000, "success")
+
+    def _bulk_enable_esp_group(self, group_name: str):
+        """Enable all ESPs in a specific group."""
+        # Get all ESPs in the specified group
+        esp_names = self._get_esps_in_group(group_name)
+        if esp_names:
+            self._bulk_toggle_esps_with_undo(esp_names, True)
+        else:
+            self.show_status(f"No ESPs found in group '{group_name}'.", 3000, "info")
+
+    def _bulk_disable_esp_group(self, group_name: str):
+        """Disable all ESPs in a specific group."""
+        # Get all ESPs in the specified group, excluding default ESPs
+        esp_names = self._get_esps_in_group(group_name)
+        # Filter out default ESPs that cannot be disabled
+        esp_names = [esp for esp in esp_names if esp not in DEFAULT_LOAD_ORDER]
+        
+        if esp_names:
+            self._bulk_toggle_esps_with_undo(esp_names, False)
+        else:
+            self.show_status(f"No disableable ESPs found in group '{group_name}'.", 3000, "info")
+
+    def _get_esps_in_group(self, group_name: str) -> list:
+        """Get all ESP names that belong to a specific group."""
+        from mod_manager.utils import get_display_info
+        
+        # Get all ESP files and check their group assignments
+        esp_files = list_esp_files()
+        group_esps = []
+        
+        for esp_name in esp_files:
+            if esp_name in EXCLUDED_ESPS:
+                continue
+            
+            # Get the display info for this ESP using the correct ID format
+            # ESP IDs are stored as "|{esp_name}" in the display info
+            esp_id = f"|{esp_name}"
+            display_info = get_display_info(esp_id)
+            esp_group = display_info.get("group", "")
+            
+            if esp_group == group_name:
+                group_esps.append(esp_name)
+        
+        return group_esps
+
     def _toggle_ue4ss_with_undo(self, mod_name: str, enable: bool):
         """Toggle UE4SS mod with undo support.""" 
         from mod_manager.ue4ss_installer import read_ue4ss_mods_txt
@@ -3274,6 +3660,758 @@ QTreeView::item:selected {
         action = self._create_group_action(mod_id, old_group, new_group,
                                          group_callback, refresh_callback)
         self._execute_with_undo(action)
+
+    # =============================================================================
+    # LOAD ORDER UNDO SUPPORT
+    # =============================================================================
+    
+    def _load_order_changed_with_undo(self, old_order: list, new_order: list):
+        """Handle load order change with undo support."""
+        # Create and execute load order action
+        action = LoadOrderAction(
+            old_order, new_order,
+            self._set_load_order_from_list,
+            self._populate_flat_lists
+        )
+        self._execute_with_undo(action)
+        
+    def _set_load_order_from_list(self, order_list: list):
+        """Set the load order from a list of mod names and update plugins.txt."""
+        # Clear the current list
+        self.enabled_mods_list.clear()
+        
+        # Add items in the specified order
+        for item_text in order_list:
+            self.enabled_mods_list.addItem(item_text)
+        
+        # Update plugins.txt to match the new order
+        self.update_plugins_txt_from_enabled_list()
+
+    def _save_preserve_load_order_setting(self):
+        """Save the preserve load order checkbox state to settings."""
+        settings = load_settings()
+        settings['preserve_load_order'] = self.preserve_load_order.isChecked()
+        save_settings(settings)
+
+    def _show_esp_context_menu(self, pos, enabled_view: bool):
+        """
+        Custom context menu handler for ESP trees supporting bulk operations.
+        
+        Args:
+            pos: Position where context menu was requested
+            enabled_view: True if this is the enabled ESP view, False for disabled view
+        """
+        view = self.esp_enabled_view if enabled_view else self.esp_disabled_view
+        index = view.indexAt(pos)
+        
+        if not index.isValid():
+            return
+            
+        # Map to source model to check if it's a group
+        src_idx = view._proxy.mapToSource(index)
+        node = src_idx.internalPointer()
+        
+        if not node:
+            return
+
+        from PyQt5.QtWidgets import QMenu, QAction, QInputDialog, QMessageBox
+
+        # ========== GROUP HEADER CONTEXT MENU ==========
+        if getattr(node, "is_group", False):
+            group_name = node.data
+            context_menu = QMenu(self)
+            
+            # Group rename action
+            rename_group_action = context_menu.addAction("Rename Group")
+            context_menu.addSeparator()
+            
+            # Group enable/disable actions - show appropriate action based on view
+            if enabled_view:
+                # In enabled view, offer disable action for the group
+                disable_group_action = context_menu.addAction(f"Disable All in '{group_name}'")
+                group_action = disable_group_action
+            else:
+                # In disabled view, offer enable action for the group
+                enable_group_action = context_menu.addAction(f"Enable All in '{group_name}'")
+                group_action = enable_group_action
+            
+            action = context_menu.exec_(view.viewport().mapToGlobal(pos))
+            
+            if action == rename_group_action:
+                # Handle group rename (reuse existing logic)
+                text, ok = QInputDialog.getText(
+                    self, "Rename Group", "Group Name:", text=group_name
+                )
+                if ok and text.strip():
+                    new_group = text.strip()
+                    # Update all ESPs in this group to the new group name
+                    esps_in_group = self._get_esps_in_group(group_name)
+                    from mod_manager.utils import set_display_info
+                    for esp_name in esps_in_group:
+                        set_display_info(f"|{esp_name}", group=new_group)
+                    self.refresh_lists()
+                    self.show_status(f"Renamed group '{group_name}' to '{new_group}'.", 4000, "success")
+                    
+            elif action == group_action:
+                # Handle the appropriate group action based on which view we're in
+                if enabled_view:
+                    self._bulk_disable_esp_group(group_name)
+                else:
+                    self._bulk_enable_esp_group(group_name)
+                
+            return
+
+        # ========== INDIVIDUAL ESP CONTEXT MENU ==========
+        # Get all selected items (including the clicked one if not selected)
+        sel_indexes = view.selectionModel().selectedRows()
+        if src_idx not in [view._proxy.mapToSource(i) for i in sel_indexes]:
+            sel_indexes.append(index)
+
+        # Build list of ESP names from selected leaf nodes
+        esp_names = []
+        for idx in sel_indexes:
+            src_index = view._proxy.mapToSource(idx)
+            n = src_index.internalPointer()
+            if n and not getattr(n, "is_group", False):
+                esp_name = n.data["real"]
+                # Don't allow operations on default ESPs
+                if esp_name not in DEFAULT_LOAD_ORDER:
+                    esp_names.append(esp_name)
+
+        if not esp_names:
+            return  # No valid ESPs selected
+
+        many = len(esp_names) > 1
+        context_menu = QMenu(self)
+        
+        # Enable/Disable actions
+        if enabled_view:
+            # In enabled view, offer disable action
+            disable_action = context_menu.addAction(
+                f"Disable Selected ESP{'s' if many else ''} ({len(esp_names)})" if many 
+                else f"Disable {esp_names[0]}"
+            )
+        else:
+            # In disabled view, offer enable action
+            enable_action = context_menu.addAction(
+                f"Enable Selected ESP{'s' if many else ''} ({len(esp_names)})" if many 
+                else f"Enable {esp_names[0]}"
+            )
+        
+        context_menu.addSeparator()
+        
+        # Standard actions (only for single selection)
+        rename_action = None
+        if not many:
+            rename_action = context_menu.addAction("Rename Display Name…")
+            
+        group_action = context_menu.addAction("Set Group…" + (" (bulk)" if many else ""))
+        delete_action = context_menu.addAction("Delete ESP File" + ("s" if many else ""))
+        
+        action = context_menu.exec_(view.viewport().mapToGlobal(pos))
+        
+        # Handle actions
+        if enabled_view and action == disable_action:
+            self._bulk_toggle_esps_with_undo(esp_names, False)
+            
+        elif not enabled_view and action == enable_action:
+            self._bulk_toggle_esps_with_undo(esp_names, True)
+            
+        elif action == rename_action and not many:
+            # Handle single ESP rename
+            esp_name = esp_names[0]
+            from mod_manager.utils import get_display_info, set_display_info
+            esp_id = f"|{esp_name}"  # Use correct ID format
+            current_text = get_display_info(esp_id).get("display", esp_name)
+            
+            text, ok = QInputDialog.getText(
+                self, "Rename Display Name", "Display Name:", text=current_text
+            )
+            if ok and text.strip():
+                new_name = text.strip()
+                if new_name != current_text:
+                    set_display_info(esp_id, display=new_name)  # Use correct ID format
+                    self.refresh_lists()
+                    self.show_status(f"Renamed ESP display name to '{new_name}'.", 4000, "success")
+                    
+        elif action == group_action:
+            # Handle group assignment (bulk or single)
+            from mod_manager.utils import get_display_info, set_display_info, set_display_info_bulk
+            first_esp = esp_names[0]
+            first_esp_id = f"|{first_esp}"  # Use correct ID format
+            current_group = get_display_info(first_esp_id).get("group", "")
+            
+            text, ok = QInputDialog.getText(
+                self, "Set Group", "Group:", text=current_group
+            )
+            if ok:
+                group_val = text.strip()
+                if many:
+                    # Bulk group change - use correct ID format for all ESPs
+                    changes = [(f"|{esp_name}", group_val) for esp_name in esp_names]
+                    set_display_info_bulk(changes)
+                    self.show_status(f"Set group for {len(esp_names)} ESPs to '{group_val}'.", 4000, "success")
+                else:
+                    # Single group change - use correct ID format
+                    set_display_info(first_esp_id, group=group_val)
+                    self.show_status(f"Set group for '{first_esp}' to '{group_val}'.", 4000, "success")
+                self.refresh_lists()
+                
+        elif action == delete_action:
+            # Handle delete (bulk or single)
+            if many:
+                reply = QMessageBox.question(
+                    self,
+                    "Confirm Deletion",
+                    f"Are you sure you want to permanently delete {len(esp_names)} ESP files?\n\n" +
+                    "\n".join(esp_names[:5]) + ("..." if len(esp_names) > 5 else ""),
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+            else:
+                reply = QMessageBox.question(
+                    self,
+                    "Confirm Deletion",
+                    f"Are you sure you want to permanently delete {esp_names[0]}?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                
+            if reply == QMessageBox.Yes:
+                # Delete all selected ESP files
+                deleted_count = 0
+                for esp_name in esp_names:
+                    try:
+                        self.delete_esp_file(esp_name)
+                        deleted_count += 1
+                    except Exception as e:
+                        print(f"[ESP-DEL] Failed to delete {esp_name}: {e}")
+                
+                if deleted_count > 0:
+                    self.show_status(f"Deleted {deleted_count} ESP file{'s' if deleted_count != 1 else ''}.", 4000, "success")
+                    self.refresh_lists()
+
+    def _enable_selected_esps(self):
+        """Enable all currently selected ESPs via keyboard shortcut (Ctrl+E)."""
+        # Determine which view has focus and get selected ESPs
+        if self.esp_disabled_view.hasFocus():
+            view = self.esp_disabled_view
+            esp_names = self._get_selected_esp_names(view)
+            if esp_names:
+                self._bulk_toggle_esps_with_undo(esp_names, True)
+            else:
+                self.show_status("No ESPs selected for enabling.", 3000, "info")
+        elif self.esp_enabled_view.hasFocus():
+            # Show info that these are already enabled
+            esp_names = self._get_selected_esp_names(self.esp_enabled_view)
+            if esp_names:
+                self.show_status(f"Selected ESP{'s are' if len(esp_names) > 1 else ' is'} already enabled.", 3000, "info")
+            else:
+                self.show_status("No ESPs selected.", 3000, "info")
+        else:
+            self.show_status("Click on an ESP view first to select ESPs for enabling.", 4000, "info")
+
+    def _disable_selected_esps(self):
+        """Disable all currently selected ESPs via keyboard shortcut (Ctrl+D)."""
+        # Determine which view has focus and get selected ESPs
+        if self.esp_enabled_view.hasFocus():
+            view = self.esp_enabled_view
+            esp_names = self._get_selected_esp_names(view)
+            # Filter out default ESPs that cannot be disabled
+            esp_names = [esp for esp in esp_names if esp not in DEFAULT_LOAD_ORDER]
+            if esp_names:
+                self._bulk_toggle_esps_with_undo(esp_names, False)
+            else:
+                self.show_status("No disableable ESPs selected.", 3000, "info")
+        elif self.esp_disabled_view.hasFocus():
+            # Show info that these are already disabled
+            esp_names = self._get_selected_esp_names(self.esp_disabled_view)
+            if esp_names:
+                self.show_status(f"Selected ESP{'s are' if len(esp_names) > 1 else ' is'} already disabled.", 3000, "info")
+            else:
+                self.show_status("No ESPs selected.", 3000, "info")
+        else:
+            self.show_status("Click on an ESP view first to select ESPs for disabling.", 4000, "info")
+
+    def _get_selected_esp_names(self, view) -> list:
+        """Get ESP names from currently selected items in the given view."""
+        esp_names = []
+        sel_indexes = view.selectionModel().selectedRows()
+        
+        for index in sel_indexes:
+            src_index = view._proxy.mapToSource(index)
+            node = src_index.internalPointer()
+            if node and not getattr(node, "is_group", False):
+                esp_name = node.data["real"]
+                esp_names.append(esp_name)
+        
+        return esp_names
+
+    def _get_paks_in_group(self, group_name: str) -> list:
+        """Get all PAK IDs that belong to a specific group."""
+        from mod_manager.utils import get_display_info
+        from mod_manager.pak_manager import list_managed_paks
+        
+        # Get all PAK files and check their group assignments
+        all_paks = list_managed_paks()
+        group_paks = []
+        
+        for pak in all_paks:
+            # Reconstruct the pak_id from pak data: "subfolder|name"
+            pak_subfolder = pak.get('subfolder', '') or ''
+            pak_id = f"{pak_subfolder}|{pak['name']}"
+            
+            # Get the display info for this PAK
+            display_info = get_display_info(pak_id)
+            pak_group = display_info.get("group", "")
+            
+            if pak_group == group_name:
+                group_paks.append(pak_id)
+        
+        return group_paks
+
+    def _bulk_activate_pak_group(self, group_name: str):
+        """Activate all PAK mods in a specific group."""
+        # Get all PAK IDs in the specified group
+        pak_ids = self._get_paks_in_group(group_name)
+        if pak_ids:
+            self._bulk_toggle_paks_with_undo(pak_ids, True)
+        else:
+            self.show_status(f"No PAK mods found in group '{group_name}'.", 3000, "info")
+
+    def _bulk_deactivate_pak_group(self, group_name: str):
+        """Deactivate all PAK mods in a specific group."""
+        # Get all PAK IDs in the specified group
+        pak_ids = self._get_paks_in_group(group_name)
+        if pak_ids:
+            self._bulk_toggle_paks_with_undo(pak_ids, False)
+        else:
+            self.show_status(f"No PAK mods found in group '{group_name}'.", 3000, "info")
+
+    def _bulk_toggle_paks_with_undo(self, pak_ids: list, activate: bool):
+        """Bulk toggle multiple PAK mods with undo support."""
+        if not pak_ids:
+            return
+            
+        # Get current states for all PAKs
+        from mod_manager.pak_manager import list_managed_paks, activate_pak, deactivate_pak
+        all_paks = list_managed_paks()
+        pak_states = {}
+        
+        # Build current state map
+        for pak in all_paks:
+            pak_subfolder = pak.get('subfolder', '') or ''
+            reconstructed_id = f"{pak_subfolder}|{pak['name']}"
+            if reconstructed_id in pak_ids:
+                pak_states[reconstructed_id] = pak.get('active', False)
+        
+        # Build list of changes needed
+        changes = []
+        for pak_id in pak_ids:
+            current_state = pak_states.get(pak_id, False)
+            if current_state != activate:
+                changes.append((pak_id, current_state, activate))
+        
+        if not changes:
+            # All PAKs already in desired state
+            action_word = "activated" if activate else "deactivated"
+            self.show_status(f"All selected PAK mods are already {action_word}.", 3000, "info")
+            return
+        
+        # Create bulk toggle action with proper PAK toggle callback
+        def toggle_callback(pak_id, new_state):
+            # Find the pak_info for this pak_id
+            all_paks = list_managed_paks()
+            for pak in all_paks:
+                pak_subfolder = pak.get('subfolder', '') or ''
+                reconstructed_id = f"{pak_subfolder}|{pak['name']}"
+                if reconstructed_id == pak_id:
+                    if new_state:
+                        activate_pak(self.game_path, pak)
+                    else:
+                        deactivate_pak(self.game_path, pak)
+                    break
+            
+        action = BulkToggleAction(
+            changes, "PAK", toggle_callback, self._load_pak_list
+        )
+        
+        if self._execute_with_undo(action):
+            # Show success message
+            activate_count = sum(1 for _, _, new_state in changes if new_state)
+            deactivate_count = len(changes) - activate_count
+            
+            if activate_count > 0 and deactivate_count > 0:
+                self.show_status(f"Toggled {len(changes)} PAK mods.", 4000, "success")
+            elif activate_count > 0:
+                self.show_status(f"Activated {activate_count} PAK mods.", 4000, "success")
+            else:
+                self.show_status(f"Deactivated {deactivate_count} PAK mods.", 4000, "success")
+
+    def _get_magic_mods_in_group(self, group_name: str) -> list:
+        """Get all MagicLoader JSON mod names that belong to a specific group."""
+        from mod_manager.utils import get_display_info
+        from mod_manager.magicloader_installer import list_ml_json_mods
+        
+        # Get all MagicLoader JSON files and check their group assignments
+        enabled_mods, disabled_mods = list_ml_json_mods(self.game_path)
+        all_mods = enabled_mods + disabled_mods
+        group_mods = []
+        
+        for mod_name in all_mods:
+            # Get the display info for this mod using the correct ID format
+            # MagicLoader mod IDs are stored as "|{mod_name}" in the display info
+            mod_id = f"|{mod_name}"
+            display_info = get_display_info(mod_id)
+            mod_group = display_info.get("group", "")
+            
+            if mod_group == group_name:
+                group_mods.append(mod_name)
+        
+        return group_mods
+
+    def _bulk_activate_magic_group(self, group_name: str):
+        """Activate all MagicLoader mods in a specific group."""
+        # Get all mod names in the specified group
+        mod_names = self._get_magic_mods_in_group(group_name)
+        if mod_names:
+            self._bulk_toggle_magic_mods_with_undo(mod_names, True)
+        else:
+            self.show_status(f"No MagicLoader mods found in group '{group_name}'.", 3000, "info")
+
+    def _bulk_deactivate_magic_group(self, group_name: str):
+        """Deactivate all MagicLoader mods in a specific group."""
+        # Get all mod names in the specified group
+        mod_names = self._get_magic_mods_in_group(group_name)
+        if mod_names:
+            self._bulk_toggle_magic_mods_with_undo(mod_names, False)
+        else:
+            self.show_status(f"No MagicLoader mods found in group '{group_name}'.", 3000, "info")
+
+    def _bulk_toggle_magic_mods_with_undo(self, mod_names: list, activate: bool):
+        """Bulk toggle multiple MagicLoader mods with undo support and CLI batching."""
+        if not mod_names:
+            return
+            
+        # Get current states for all mods
+        from mod_manager.magicloader_installer import list_ml_json_mods
+        enabled_mods, disabled_mods = list_ml_json_mods(self.game_path)
+        
+        # Build list of changes needed
+        changes = []
+        for mod_name in mod_names:
+            current_state = mod_name in enabled_mods
+            if current_state != activate:
+                changes.append((mod_name, current_state, activate))
+        
+        if not changes:
+            # All mods already in desired state
+            action_word = "activated" if activate else "deactivated"
+            self.show_status(f"All selected MagicLoader mods are already {action_word}.", 3000, "info")
+            return
+        
+        # Create bulk toggle action with proper MagicLoader batching
+        def toggle_callback(mod_id, new_state):
+            # This callback will be called for individual items in bulk operations
+            # We don't call the CLI here since we'll batch everything
+            from mod_manager.magicloader_installer import activate_ml_mod, deactivate_ml_mod
+            if new_state:
+                activate_ml_mod(self.game_path, mod_id)
+            else:
+                deactivate_ml_mod(self.game_path, mod_id)
+        
+        # Special MagicLoader bulk action that handles CLI batching
+        action = MagicLoaderBulkToggleAction(
+            changes, self.game_path, self._refresh_magic_status
+        )
+        
+        if self._execute_with_undo(action):
+            # Show success message
+            activate_count = sum(1 for _, _, new_state in changes if new_state)
+            deactivate_count = len(changes) - activate_count
+            
+            if activate_count > 0 and deactivate_count > 0:
+                self.show_status(f"Toggled {len(changes)} MagicLoader mods.", 4000, "success")
+            elif activate_count > 0:
+                self.show_status(f"Activated {activate_count} MagicLoader mods.", 4000, "success")
+            else:
+                self.show_status(f"Deactivated {deactivate_count} MagicLoader mods.", 4000, "success")
+
+    def _show_magic_context_menu(self, pos, enabled: bool):
+        """Context menu handler for both enabled/disabled MagicLoader trees."""
+        # ----- figure out which view the user clicked in -----
+        view = self.magic_enabled_view if enabled else self.magic_disabled_view
+        index = view.indexAt(pos)
+        if not index.isValid():
+            return
+
+        # ----- get the model(s) presently wired to that view -----
+        view_model = view.model()                     # may be proxy or source
+        if isinstance(view_model, QSortFilterProxyModel):
+            src_index = view_model.mapToSource(index)
+            model     = view_model.sourceModel()
+        else:
+            src_index = index                         # already source
+            model     = view_model
+
+        node = src_index.internalPointer()            # our custom _Node
+
+        if not node:
+            return
+
+        from PyQt5.QtWidgets import QMenu, QAction, QInputDialog, QMessageBox
+
+        # ========== GROUP HEADER CONTEXT MENU ==========
+        if getattr(node, "is_group", False):
+            group_name = node.data
+            context_menu = QMenu(self)
+            
+            # Group rename action
+            rename_group_action = context_menu.addAction("Rename Group")
+            context_menu.addSeparator()
+            
+            # Group enable/disable actions - show appropriate action based on view
+            if enabled:
+                # In enabled view, offer deactivate action for the group
+                deactivate_group_action = context_menu.addAction(f"Deactivate All in '{group_name}'")
+                group_action = deactivate_group_action
+            else:
+                # In disabled view, offer activate action for the group
+                activate_group_action = context_menu.addAction(f"Activate All in '{group_name}'")
+                group_action = activate_group_action
+            
+            action = context_menu.exec_(view.viewport().mapToGlobal(pos))
+            
+            if action == rename_group_action:
+                # Handle group rename
+                text, ok = QInputDialog.getText(
+                    self, "Rename Group", "Group Name:", text=group_name
+                )
+                if ok and text.strip():
+                    new_group = text.strip()
+                    # Update all MagicLoader mods in this group to the new group name
+                    mods_in_group = self._get_magic_mods_in_group(group_name)
+                    from mod_manager.utils import set_display_info
+                    for mod_name in mods_in_group:
+                        set_display_info(f"|{mod_name}", group=new_group)
+                    self._refresh_magic_status()
+                    self.show_status(f"Renamed group '{group_name}' to '{new_group}'.", 4000, "success")
+                    
+            elif action == group_action:
+                # Handle the appropriate group action based on which view we're in
+                if enabled:
+                    self._bulk_deactivate_magic_group(group_name)
+                else:
+                    self._bulk_activate_magic_group(group_name)
+                
+            return
+
+        # ========== INDIVIDUAL MAGICLOADER MOD CONTEXT MENU ==========
+        # Get all selected items (including the clicked one if not selected)
+        sel_indexes = view.selectionModel().selectedRows()
+        if src_index not in [view_model.mapToSource(i) if isinstance(view_model, QSortFilterProxyModel) else i for i in sel_indexes]:
+            sel_indexes.append(index)
+
+        # Build list of mod names from selected leaf nodes
+        mod_names = []
+        for idx in sel_indexes:
+            src_index = view_model.mapToSource(idx) if isinstance(view_model, QSortFilterProxyModel) else idx
+            n = src_index.internalPointer()
+            if n and not getattr(n, "is_group", False):
+                mod_names.append(n.data["real"])
+
+        if not mod_names:
+            return  # No valid mods selected
+
+        many = len(mod_names) > 1
+        context_menu = QMenu(self)
+        
+        # Enable/Disable actions
+        if enabled:
+            # In enabled view, offer deactivate action
+            deactivate_action = context_menu.addAction(
+                f"Deactivate Selected Mod{'s' if many else ''} ({len(mod_names)})" if many 
+                else f"Deactivate {mod_names[0]}"
+            )
+        else:
+            # In disabled view, offer activate action
+            activate_action = context_menu.addAction(
+                f"Activate Selected Mod{'s' if many else ''} ({len(mod_names)})" if many 
+                else f"Activate {mod_names[0]}"
+            )
+        
+        context_menu.addSeparator()
+        
+        # Standard actions (only for single selection)
+        rename_action = None
+        if not many:
+            rename_action = context_menu.addAction("Rename Display Name…")
+            
+        group_action = context_menu.addAction("Set Group…" + (" (bulk)" if many else ""))
+        delete_action = context_menu.addAction("Delete JSON Mod" + ("s" if many else ""))
+        
+        action = context_menu.exec_(view.viewport().mapToGlobal(pos))
+        
+        # Handle actions
+        if enabled and action == deactivate_action:
+            self._bulk_toggle_magic_mods_with_undo(mod_names, False)
+            
+        elif not enabled and action == activate_action:
+            self._bulk_toggle_magic_mods_with_undo(mod_names, True)
+            
+        elif action == rename_action and not many:
+            # Handle single mod rename
+            mod_name = mod_names[0]
+            from mod_manager.utils import get_display_info, set_display_info
+            mod_id = f"|{mod_name}"
+            current_text = get_display_info(mod_id).get("display", mod_name)
+            
+            text, ok = QInputDialog.getText(
+                self, "Rename Display Name", "Display Name:", text=current_text
+            )
+            if ok and text.strip():
+                new_name = text.strip()
+                if new_name != current_text:
+                    set_display_info(mod_id, display=new_name)
+                    self._refresh_magic_status()
+                    self.show_status(f"Renamed MagicLoader mod display name to '{new_name}'.", 4000, "success")
+                    
+        elif action == group_action:
+            # Handle group assignment (bulk or single)
+            from mod_manager.utils import get_display_info, set_display_info, set_display_info_bulk
+            first_mod_id = f"|{mod_names[0]}"
+            current_group = get_display_info(first_mod_id).get("group", "")
+            
+            text, ok = QInputDialog.getText(
+                self, "Set Group", "Group:", text=current_group
+            )
+            if ok:
+                group_val = text.strip()
+                if many:
+                    # Bulk group change
+                    changes = [(f"|{mod_name}", group_val) for mod_name in mod_names]
+                    set_display_info_bulk(changes)
+                    self.show_status(f"Set group for {len(mod_names)} MagicLoader mods to '{group_val}'.", 4000, "success")
+                else:
+                    # Single group change
+                    set_display_info(first_mod_id, group=group_val)
+                    self.show_status(f"Set group for '{mod_names[0]}' to '{group_val}'.", 4000, "success")
+                self._refresh_magic_status()
+                
+        elif action == delete_action:
+            # Handle delete (bulk or single)
+            if many:
+                reply = QMessageBox.question(
+                    self,
+                    "Confirm Deletion",
+                    f"Are you sure you want to permanently delete {len(mod_names)} MagicLoader JSON mods?\n\n" +
+                    "\n".join(mod_names[:5]) + ("..." if len(mod_names) > 5 else ""),
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                
+                if reply == QMessageBox.Yes:
+                    deleted_count = 0
+                    for mod_name in mod_names:
+                        try:
+                            self._remove_magic_mod(mod_name)
+                            deleted_count += 1
+                        except Exception as e:
+                            print(f"[MAGIC-DEL] Failed to delete {mod_name}: {e}")
+                    
+                    if deleted_count > 0:
+                        self.show_status(f"Deleted {deleted_count} MagicLoader mod{'s' if deleted_count != 1 else ''}.", 4000, "success")
+                        self._refresh_magic_status()
+            else:
+                # Single mod delete
+                mod_name = mod_names[0]
+                reply = QMessageBox.question(
+                    self,
+                    "Confirm Deletion",
+                    f"Are you sure you want to permanently delete MagicLoader mod '{mod_name}'?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                
+                if reply == QMessageBox.Yes:
+                    self._remove_magic_mod(mod_name)
+
+    def _remove_magic_mod(self, mod_name: str):
+        """Remove MagicLoader JSON mod permanently."""
+        from mod_manager.magicloader_installer import get_ml_mods_dir, get_disabled_ml_mods_dir
+        
+        enabled_dir = get_ml_mods_dir(self.game_path)
+        disabled_dir = get_disabled_ml_mods_dir(self.game_path)
+        
+        if not enabled_dir or not disabled_dir:
+            self.show_status("MagicLoader directories not found.", 6000, "error")
+            return
+        
+        # Check both enabled and disabled locations
+        enabled_path = enabled_dir / mod_name
+        disabled_path = disabled_dir / mod_name
+        
+        try:
+            removed = False
+            if enabled_path.exists():
+                enabled_path.unlink()
+                removed = True
+            if disabled_path.exists():
+                disabled_path.unlink()
+                removed = True
+            
+            if removed:
+                # Call CLI to reload configuration after deletion
+                from mod_manager.magicloader_installer import reload_ml_config
+                reload_ml_config(self.game_path)
+                self.show_status(f"MagicLoader mod '{mod_name}' was deleted successfully.", 4000, "success")
+                self._refresh_magic_status()
+            else:
+                self.show_status(f"MagicLoader mod '{mod_name}' not found.", 6000, "error")
+        except Exception as e:
+            self.show_status(f"Failed to delete MagicLoader mod '{mod_name}': {str(e)}", 8000, "error")
+
+    def _install_obse64_from_loose_files(self, obse64_files):
+        """Install OBSE64 from a list of loose file paths."""
+        from mod_manager.obse64_installer import install_obse64
+        from mod_manager.utils import get_install_type
+        import tempfile
+        import uuid
+        import shutil
+        
+        # Check Steam restriction
+        install_type = get_install_type()
+        if install_type != "steam":
+            return False, "OBSE64 is only supported on Steam installations"
+        
+        temp_dir = None
+        try:
+            # Create temporary directory mimicking extracted archive
+            temp_dir = os.path.join(tempfile.gettempdir(), f"obse64_loose_{uuid.uuid4()}")
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            # Copy only the essential OBSE64 files to temp directory (ignore src, readme, etc.)
+            copied_files = []
+            for file_path in obse64_files:
+                filename = os.path.basename(file_path)
+                dest_path = os.path.join(temp_dir, filename)
+                shutil.copy2(file_path, dest_path)
+                copied_files.append(filename)
+            
+            # Use existing installation function
+            success, message = install_obse64(self.game_path, temp_dir, None)
+            if success:
+                files_list = ", ".join(copied_files)
+                return True, f"Installed {len(copied_files)} files: {files_list}"
+            else:
+                return False, message
+            
+        except Exception as e:
+            return False, f"Installation error: {str(e)}"
+        finally:
+            # Cleanup
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 class MigrateModsDialog(QDialog):
@@ -3368,6 +4506,147 @@ def _iter_leaf_nodes(node):
             stack.extend(n.children)
         else:
             yield n
+
+class OBSE64ManualInstallDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("OBSE64 Manual Installation Required")
+        self.setFixedSize(580, 460)
+        self.setModal(True)
+        
+        # Apply dark theme styling
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2b2b2b;
+                color: #e0e0e0;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+            QPushButton {
+                background-color: #404040;
+                color: #e0e0e0;
+                border: 1px solid #555;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+            }
+            QPushButton:pressed {
+                background-color: #353535;
+            }
+        """)
+        
+        # Main layout
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        
+        # Title
+        title = QLabel("OBSE64 Manual Installation Required")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ff9800; margin-bottom: 10px;")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+        
+        # Explanation text
+        explanation = QLabel(
+            "OBSE64 archives use bcj2 compression which cannot be automatically extracted.\n"
+            "Please follow these simple steps for installation:"
+        )
+        explanation.setWordWrap(True)
+        explanation.setStyleSheet("font-size: 13px; margin-bottom: 10px;")
+        layout.addWidget(explanation)
+        
+        # Steps container with background
+        steps_container = QLabel()
+        steps_container.setStyleSheet("""
+            background-color: #1e1e1e; 
+            border: 1px solid #404040; 
+            border-radius: 6px; 
+            padding: 20px;
+        """)
+        
+        # Steps text with proper formatting
+        steps_text = """<div style="line-height: 1.6;">
+<p style="margin: 0 0 12px 0;"><b style="color: #ff9800;">Step 1:</b> Extract the OBSE64 archive manually using <b>7-Zip</b> or <b>WinRAR</b></p>
+
+<p style="margin: 0 0 12px 0;"><b style="color: #ff9800;">Step 2:</b> Look for these files in the extracted folder:</p>
+<ul style="margin: 0 0 12px 20px; padding: 0;">
+    <li style="margin: 4px 0;">• <b>obse64_loader.exe</b></li>
+    <li style="margin: 4px 0;">• <b>obse64_*.dll</b> files (usually 1-3 files)</li>
+</ul>
+
+<p style="margin: 0 0 12px 0;"><b style="color: #ff9800;">Step 3:</b> <b>Drag these files</b> directly onto this application window</p>
+
+<p style="margin: 0 0 12px 0;"><b style="color: #ff9800;">Step 4:</b> The files will be automatically detected and installed</p>
+
+<p style="margin: 0 0 0 0;"><b style="color: #66bb6a;">Why manual extraction?</b><br>
+The OBSE64 archive uses bcj2 compression that requires external tools to extract properly. This ensures reliable installation without dependency issues.</p>
+</div>"""
+        
+        steps_container.setText(steps_text)
+        steps_container.setWordWrap(True)
+        layout.addWidget(steps_container)
+        
+        # Note about ignoring files
+        note = QLabel("<i>Note: You can ignore the 'src' folder and text files - only drag the .exe and .dll files.</i>")
+        note.setStyleSheet("color: #aaa; font-size: 11px; font-style: italic;")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(10)
+        
+        self.browse_btn = QPushButton("Continue to Browse Archive")
+        self.browse_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ff9800; 
+                color: #000; 
+                font-weight: bold; 
+                padding: 10px 20px;
+                border: none;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #ffb74d;
+            }
+            QPushButton:pressed {
+                background-color: #f57c00;
+            }
+        """)
+        
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #666; 
+                color: white; 
+                padding: 10px 20px;
+                border: none;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #777;
+            }
+            QPushButton:pressed {
+                background-color: #555;
+            }
+        """)
+        
+        button_layout.addWidget(self.browse_btn)
+        button_layout.addWidget(self.cancel_btn)
+        layout.addLayout(button_layout)
+        
+        # Connect buttons
+        self.browse_btn.clicked.connect(self.accept)
+        self.cancel_btn.clicked.connect(self.reject)
+        
+        # Result tracking
+        self.result_browse = False
+    
+    def accept(self):
+        self.result_browse = True
+        super().accept()
 
 def run():
     app = QApplication(sys.argv)

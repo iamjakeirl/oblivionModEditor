@@ -366,7 +366,7 @@ QTreeView::item:selected {
     # ---------------- helper to trigger owner window refresh ----------------
     def _refresh_parent_views(self):
         wnd = self.window()
-        for fn in ("_load_pak_list", "refresh_lists", "_refresh_ue4ss_status"):
+        for fn in ("_load_pak_list", "refresh_lists", "_refresh_ue4ss_status", "_refresh_magic_status", "_refresh_obse64_status"):
             if hasattr(wnd, fn):
                 try:
                     getattr(wnd, fn)()

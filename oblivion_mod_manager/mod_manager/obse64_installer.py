@@ -126,13 +126,18 @@ def install_obse64(game_root: str | Path,
         if zip_path.suffix.lower() == '.zip':
             with zipfile.ZipFile(zip_path) as zf:
                 zf.extractall(temp_extract)
-        elif zip_path.suffix.lower() in ['.7z', '.rar']:
-            # Use pyunpack for other formats
+        elif zip_path.suffix.lower() == '.7z':
+            # Try py7zr first (faster and more reliable for most 7z files)
             try:
-                from pyunpack import Archive
-                Archive(zip_path).extractall(temp_extract)
-            except ImportError:
-                return False, "Missing pyunpack library for .7z/.rar extraction"
+                import py7zr
+                with py7zr.SevenZipFile(zip_path, mode='r') as z:
+                    z.extractall(temp_extract)
+            except Exception as e:
+                # If py7zr fails (e.g., unsupported compression like bcj2), suggest manual extraction
+                return False, f"Unsupported 7z compression format ({str(e)}). Please extract the archive manually and drag the loose files onto the main window."
+        elif zip_path.suffix.lower() == '.rar':
+            # RAR files are not supported - suggest manual extraction
+            return False, "RAR archives are not supported. Please extract the archive manually and drag the loose files onto the main window."
         else:
             return False, f"Unsupported archive format: {zip_path.suffix}"
 
