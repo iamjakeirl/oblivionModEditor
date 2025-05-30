@@ -1,7 +1,7 @@
 # mod_manager/ue4ss_installer.py
 import os, tempfile, zipfile, shutil, requests, glob
 from pathlib import Path
-from .utils import UE4SS_URL, get_install_type
+from .utils import UE4SS_URL, get_install_type, get_ue4ss_download_url
 import json
 import re
 
@@ -41,7 +41,7 @@ def install_ue4ss(game_root: str, install_type: str, progress_cb=None):
 
     tmp_zip = Path(tempfile.gettempdir()) / "ue4ss_tmp.zip"
     # download
-    with requests.get(UE4SS_URL, stream=True) as r:
+    with requests.get(get_ue4ss_download_url(), stream=True) as r:
         r.raise_for_status()
         with open(tmp_zip, "wb") as f:
             for chunk in r.iter_content(chunk_size=8192):

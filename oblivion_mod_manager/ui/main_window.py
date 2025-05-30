@@ -4,11 +4,12 @@ import os
 import shutil
 import tempfile
 import uuid
+import re
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QListWidget, QListWidgetItem, QFileDialog, QMessageBox, QAbstractItemView, QCheckBox,
     QMenu, QAction, QTabWidget, QInputDialog, QProgressDialog, QFrame, QDialog, QSpacerItem, QSizePolicy,
-    QTableWidget, QTableWidgetItem, QTableView, QTreeView, QMenuBar
+    QTableWidget, QTableWidgetItem, QTableView, QTreeView, QMenuBar, QShortcut
 )
 from PyQt5.QtCore import Qt, QEvent, QItemSelectionModel, QUrl, QMimeData, QTimer, QByteArray, QSortFilterProxyModel
 from PyQt5.QtGui import (
@@ -19,7 +20,7 @@ from mod_manager.utils import (
     get_game_path, SETTINGS_PATH, get_esp_folder, DATA_DIR, open_folder_in_explorer,
     guess_install_type, set_install_type, load_settings, save_settings,
     get_custom_mod_dir_name, _merge_tree, get_display_info, _display_cache,
-    set_display_info, set_display_info_bulk
+    set_display_info, set_display_info_bulk, set_custom_mod_dir_name
 )
 from mod_manager.utils import get_install_type     # ensure we can detect Steam/GamePass
 from mod_manager.registry import list_esp_files, read_plugins_txt, write_plugins_txt
@@ -69,11 +70,14 @@ EXCLUDED_ESPS = [
 ]
 
 from ui.install_type_dialog import InstallTypeDialog
-from mod_manager.ue4ss_installer import ensure_ue4ss_configs
+from mod_manager.ue4ss_installer import (
+    ensure_ue4ss_configs, add_ue4ss_mod, ue4ss_installed, get_ue4ss_mods_dir, 
+    get_ue4ss_bin_dir, read_ue4ss_mods_txt, set_ue4ss_mod_enabled, install_ue4ss, uninstall_ue4ss
+)
 from ui.jorkTableQT import ModTableModel
 from ui.jorkTreeViewQT import ModTreeModel      # NEW import
 from ui.jorkTreeBrowser import ModTreeBrowser
-from ui.row_builders import rows_from_paks, rows_from_esps
+from ui.row_builders import rows_from_paks, rows_from_esps, rows_from_ue4ss, rows_from_obse64_plugins, rows_from_magic
 # Custom proxy for advanced searching
 from ui.jorkTreeBrowser import ModFilterProxy
 # NEW: MagicLoader helpers
@@ -81,16 +85,14 @@ from mod_manager.magicloader_installer import (
     magicloader_installed, install_magicloader, uninstall_magicloader,
     reenable_magicloader, get_ml_mods_dir, list_ml_json_mods,
     deactivate_ml_mod, activate_ml_mod, get_magicloader_dir, _target_ml_dir,
-    bulk_activate_ml_mods, bulk_deactivate_ml_mods, reload_ml_config
+    bulk_activate_ml_mods, bulk_deactivate_ml_mods, reload_ml_config, get_disabled_ml_mods_dir
 )
-from ui.row_builders import rows_from_magic
 # NEW: OBSE64 helpers
 from mod_manager.obse64_installer import (
     obse64_installed, install_obse64, uninstall_obse64,
     reenable_obse64, get_obse_plugins_dir, list_obse_plugins,
     activate_obse_plugin, deactivate_obse_plugin, get_obse64_dir, launch_obse64
 )
-from ui.row_builders import rows_from_obse64_plugins
 # NEW: Undo system
 from ui.undo_system import UndoStack, UndoAction, ToggleModAction, RenameAction, GroupChangeAction, FileOperationAction, StateSnapshot, PakToggleAction, LoadOrderAction, BulkToggleAction, MagicLoaderBulkToggleAction
 
@@ -286,7 +288,6 @@ class MainWindow(QWidget):
         self.disabled_mods_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.disabled_mods_label.setAlignment(Qt.AlignCenter)
         self.esp_layout.addWidget(self.disabled_mods_label)
-        from ui.row_builders import rows_from_esps
         self.esp_disabled_view = ModTreeBrowser([], search_box=self.esp_search,
                                                show_real_cb=self.chk_real_esp.isChecked, parent=self)
         self.esp_layout.addWidget(self.esp_disabled_view)
@@ -417,7 +418,6 @@ QTreeView::item:selected {
             lambda pos: self._show_esp_context_menu(pos, False))
 
         # Add keyboard shortcuts for ESP bulk operations - QKeySequence already imported at top
-        from PyQt5.QtWidgets import QShortcut
         
         # Ctrl+E: Enable selected ESPs
         enable_shortcut = QShortcut(QKeySequence("Ctrl+E"), self.esp_frame)
@@ -618,7 +618,6 @@ QTreeView::item:selected {
         self.ue4ss_disabled_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.ue4ss_disabled_label.setAlignment(Qt.AlignCenter)
         self.ue4ss_layout.addWidget(self.ue4ss_disabled_label)
-        from ui.row_builders import rows_from_ue4ss
         self.ue4ss_disabled_view = ModTreeBrowser([], search_box=self.ue4ss_search,
                                                  show_real_cb=self.chk_real_ue4ss.isChecked, parent=self)
         self.ue4ss_layout.addWidget(self.ue4ss_disabled_view)
@@ -698,7 +697,6 @@ QTreeView::item:selected {
         self.obse64_disabled_label.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.obse64_disabled_label.setAlignment(Qt.AlignCenter)
         self.obse64_layout.addWidget(self.obse64_disabled_label)
-        from ui.row_builders import rows_from_obse64_plugins
         self.obse64_disabled_view = ModTreeBrowser([], search_box=self.obse64_search,
                                                   show_real_cb=self.chk_real_obse64.isChecked, parent=self)
         self.obse64_layout.addWidget(self.obse64_disabled_view)
@@ -1237,7 +1235,6 @@ QTreeView::item:selected {
             force_subfolder: If provided, use this as the subfolder for all PAKs
         """
         # --- ~mods and LogicMods merge logic ---
-        from mod_manager.pak_manager import get_paks_root_dir, ensure_paks_structure, reconcile_pak_list
         ensure_paks_structure(self.game_path)
         paks_root = get_paks_root_dir(self.game_path)
         # Merge ~mods from archive if present
@@ -1275,21 +1272,35 @@ QTreeView::item:selected {
         }
         # also skip any LogicMods folder we just merged
         skip_dirs.update({os.path.abspath(d) for d in logicmods_dirs})
+        
+        print(f"[DEBUG] Scanning extract_dir: {extract_dir}")
+        print(f"[DEBUG] skip_dirs: {skip_dirs}")
+        
         for root, _, files in os.walk(extract_dir):
             abs_root = os.path.abspath(root)
             # Skip any files inside ~mods or LogicMods in the extracted archive
             if any(abs_root == d or abs_root.startswith(d + os.sep) for d in skip_dirs):
+                print(f"[DEBUG] Skipping directory: {abs_root}")
                 continue
+            
+            print(f"[DEBUG] Scanning directory: {root}")
+            print(f"[DEBUG] Files found: {files}")
+            
             for filename in files:
                 filepath = os.path.join(root, filename)
                 
                 # Check if it's an ESP file
                 if filename.lower().endswith('.esp'):
                     esp_files.append(filepath)
+                    print(f"[DEBUG] Found ESP file: {filepath}")
                 
                 # Check if it's a PAK file
                 elif filename.lower().endswith(PAK_EXTENSION):
                     pak_files.append(filepath)
+                    print(f"[DEBUG] Found PAK file: {filepath}")
+        
+        print(f"[DEBUG] Total ESP files found: {len(esp_files)}")
+        print(f"[DEBUG] Total PAK files found: {len(pak_files)}")
         
         # --- Detect UE4SS-style folders ---
         ue4ss_mod_folders = []
@@ -1339,14 +1350,22 @@ QTreeView::item:selected {
         # Process ESP files
         installed_esp = 0
         installed_esp_names = []  # Track the names of installed ESPs for auto-enabling
+        
+        print(f"[DEBUG] Processing {len(esp_files)} ESP files...")
+        
         for esp_path in esp_files:
             try:
                 # Get destination path
                 esp_name = os.path.basename(esp_path)
                 dest_path = os.path.join(get_esp_folder(), esp_name)
                 
+                print(f"[DEBUG] Processing ESP: {esp_name}")
+                print(f"[DEBUG] Source: {esp_path}")
+                print(f"[DEBUG] Destination: {dest_path}")
+                
                 # Check if file already exists
                 if os.path.exists(dest_path):
+                    print(f"[DEBUG] ESP file already exists at destination")
                     reply = QMessageBox.question(
                         self,
                         "File Already Exists",
@@ -1355,21 +1374,28 @@ QTreeView::item:selected {
                         QMessageBox.No
                     )
                     if reply != QMessageBox.Yes:
+                        print(f"[DEBUG] User chose not to overwrite, skipping")
                         continue
                 
                 # Copy the file
                 shutil.copy2(esp_path, dest_path)
+                print(f"[DEBUG] ESP file copied successfully")
                 
                 # Update plugins.txt - add to the list of ESPs to enable
                 if not esp_name in DEFAULT_LOAD_ORDER and not esp_name in EXCLUDED_ESPS:
                     installed_esp_names.append(esp_name)
+                    print(f"[DEBUG] ESP added to auto-enable list")
+                else:
+                    print(f"[DEBUG] ESP is default/excluded, not adding to auto-enable list")
                 
                 installed_esp += 1
+                print(f"[DEBUG] ESP installation count: {installed_esp}")
                 
             except Exception as e:
                 error_msg = f"Failed to install {os.path.basename(esp_path)}: {str(e)}"
+                print(f"[DEBUG] ESP installation failed: {error_msg}")
                 self.show_status(f"Error: {error_msg}", 10000, "error")
-                
+        
         if installed_esp:
             self.refresh_lists()  # Refresh ESP tab after installing ESPs
         
@@ -1399,7 +1425,6 @@ QTreeView::item:selected {
         # --- Install detected UE4SS mods ---
         installed_ue4ss = 0
         if ue4ss_mod_folders:
-            from mod_manager.ue4ss_installer import add_ue4ss_mod, ue4ss_installed
             ok, _ = ue4ss_installed(self.game_path)
             if not ok:
                 self.show_status("UE4SS not installed – skipping UE4SS mods.", 6000, "warning")
@@ -1411,7 +1436,6 @@ QTreeView::item:selected {
         # --- Merge any shared resource folders ---
         installed_shared = 0  # Count installed shared resources
         if shared_mod_folders:
-            from mod_manager.ue4ss_installer import get_ue4ss_mods_dir
             shared_dest_root = get_ue4ss_mods_dir(self.game_path)
             if shared_dest_root:
                 shared_dest = shared_dest_root / "shared"
@@ -1455,8 +1479,6 @@ QTreeView::item:selected {
 
         installed_ml = 0
         if magic_dirs:
-            from mod_manager.magicloader_installer import get_disabled_ml_mods_dir
-            import shutil
             dest_root = get_disabled_ml_mods_dir(self.game_path)
             os.makedirs(dest_root, exist_ok=True)
 
@@ -1487,6 +1509,15 @@ QTreeView::item:selected {
         
         # Build summary message with all installed components
         summary_parts = []
+        
+        print(f"[DEBUG] Summary generation:")
+        print(f"[DEBUG] installed_esp: {installed_esp}")
+        print(f"[DEBUG] installed_pak: {installed_pak}")
+        print(f"[DEBUG] installed_ue4ss: {installed_ue4ss}")
+        print(f"[DEBUG] installed_shared: {installed_shared}")
+        print(f"[DEBUG] installed_obse64: {installed_obse64}")
+        print(f"[DEBUG] installed_ml: {installed_ml}")
+        
         if installed_esp > 0:
             summary_parts.append(f"{installed_esp} ESP")
         if installed_pak > 0:
@@ -1500,11 +1531,14 @@ QTreeView::item:selected {
         if installed_ml:
             summary_parts.append("MagicLoader")
             
+        print(f"[DEBUG] summary_parts: {summary_parts}")
+            
         if not summary_parts:
             summary = f"No installable content found in {mod_name}."
         else:
             summary = f"Installed {', '.join(summary_parts)} from {mod_name}."
             
+        print(f"[DEBUG] Final summary: {summary}")
         self.show_status(summary, 8000, "success")
         
         # Refresh the lists to show the newly enabled ESPs
@@ -1690,7 +1724,6 @@ QTreeView::item:selected {
         if getattr(self, "load_order_mode", None) and self.load_order_mode.isChecked():
             self._populate_flat_lists()
             return
-        from ui.row_builders import rows_from_esps
         esp_files = list_esp_files()
         if self.hide_stock_checkbox.isChecked():
             # Exclude default ESPs when checkbox is ON
@@ -1795,7 +1828,6 @@ QTreeView::item:selected {
         """Load the list of managed PAK mods into the enabled/disabled tables."""
         if not self.game_path:
             return
-        from mod_manager.utils import get_display_info
 
         reconcile_pak_list(self.game_path)
         pak_mods = list_managed_paks()
@@ -1830,7 +1862,6 @@ QTreeView::item:selected {
         # ── 2) (Re)build row‑dicts with **display** + **group** information ──
         cache = _display_cache()                                       # O(1) lookup
         def normalize_cb(subfolder):
-            import re
             return re.sub(r'^(DisabledMods[\\/]+)', '', subfolder, flags=re.IGNORECASE)
         all_rows = rows_from_paks(pak_mods, cache, normalize_cb)
         enabled_rows = [row for row in all_rows if row["active"]]
@@ -2027,7 +2058,6 @@ QTreeView::item:selected {
         if not node:
             return
 
-        from PyQt5.QtWidgets import QMenu, QAction, QInputDialog, QMessageBox
 
         # ========== GROUP HEADER CONTEXT MENU ==========
         if getattr(node, "is_group", False):
@@ -2059,7 +2089,6 @@ QTreeView::item:selected {
                     new_group = text.strip()
                     # Update all PAK mods in this group to the new group name
                     paks_in_group = self._get_paks_in_group(group_name)
-                    from mod_manager.utils import set_display_info
                     for pak_id in paks_in_group:
                         set_display_info(pak_id, group=new_group)
                     self._load_pak_list()
@@ -2130,7 +2159,6 @@ QTreeView::item:selected {
         elif action == rename_action and not many:
             # Handle single PAK rename
             pak_id = pak_ids[0]
-            from mod_manager.utils import get_display_info, set_display_info
             current_text = get_display_info(pak_id).get("display", pak_id.split('|')[-1])
             
             text, ok = QInputDialog.getText(
@@ -2158,7 +2186,6 @@ QTreeView::item:selected {
                     
         elif action == group_action:
             # Handle group assignment (bulk or single)
-            from mod_manager.utils import get_display_info, set_display_info, set_display_info_bulk
             first_pak_id = pak_ids[0]
             current_group = get_display_info(first_pak_id).get("group", "")
             
@@ -2185,7 +2212,6 @@ QTreeView::item:selected {
                 pak_infos = []
                 for pak_id in pak_ids:
                     # Find the pak_info for each pak_id
-                    from mod_manager.pak_manager import list_managed_paks
                     all_paks = list_managed_paks()
                     for pak in all_paks:
                         pak_subfolder = pak.get('subfolder', '') or ''
@@ -2217,7 +2243,6 @@ QTreeView::item:selected {
             else:
                 # Single PAK delete - get pak_info and call existing delete method
                 pak_id = pak_ids[0]
-                from mod_manager.pak_manager import list_managed_paks
                 all_paks = list_managed_paks()
                 pak_info = None
                 for pak in all_paks:
@@ -2231,8 +2256,6 @@ QTreeView::item:selected {
                     self.delete_pak_mod(pak_info)
 
     def delete_pak_mod(self, pak_info):
-        from PyQt5.QtWidgets import QMessageBox
-        from mod_manager.pak_manager import remove_pak
         reply = QMessageBox.question(
             self,
             "Confirm Deletion",
@@ -2426,7 +2449,6 @@ QTreeView::item:selected {
 
             # 2️⃣ fall back to the expected target dir (steam vs gamepass)
             if not ml_path:
-                from pathlib import Path
                 ml_path = _target_ml_dir(Path(self.game_path), get_install_type() or "steam")
 
             if ml_path and os.path.isdir(ml_path):
@@ -2434,7 +2456,6 @@ QTreeView::item:selected {
             else:
                 self.show_status("MagicLoader folder not found.", 4000, "error")
         elif current_index == 3:  # UE4SS tab
-            from mod_manager.ue4ss_installer import get_ue4ss_bin_dir
             ue4ss_folder = get_ue4ss_bin_dir(self.game_path)
             if ue4ss_folder and os.path.isdir(ue4ss_folder):
                 open_folder_in_explorer(ue4ss_folder)
@@ -2474,8 +2495,6 @@ QTreeView::item:selected {
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _refresh_ue4ss_status(self):
-        from mod_manager.ue4ss_installer import ue4ss_installed, get_ue4ss_bin_dir, read_ue4ss_mods_txt
-        import os
         if not self.game_path:
             self.ue4ss_status.setText("No game path set.")
             self.ue4ss_enabled_view.clear()
@@ -2491,7 +2510,6 @@ QTreeView::item:selected {
         sentinel = "; Built-in keybinds, do not move up!"
         enabled = [mod for mod in enabled if mod not in default_mods and mod != sentinel]
         disabled = [mod for mod in disabled if mod not in default_mods and mod != sentinel]
-        from ui.row_builders import rows_from_ue4ss
         rows = rows_from_ue4ss(enabled, disabled)
         enabled_rows = [r for r in rows if r["active"]]
         disabled_rows = [r for r in rows if not r["active"]]
@@ -2529,25 +2547,19 @@ QTreeView::item:selected {
         self._update_ue4ss_btns()
 
     def enable_ue4ss_mod(self, item):
-        from mod_manager.ue4ss_installer import set_ue4ss_mod_enabled
         mod = item.text()
         set_ue4ss_mod_enabled(self.game_path, mod, True)
         self._refresh_ue4ss_status()
 
     def disable_ue4ss_mod(self, item):
-        from mod_manager.ue4ss_installer import set_ue4ss_mod_enabled
         mod = item.text()
         set_ue4ss_mod_enabled(self.game_path, mod, False)
         self._refresh_ue4ss_status()
 
     def _install_update_ue4ss(self):
-        from mod_manager.ue4ss_installer import install_ue4ss
-        from mod_manager.utils import get_install_type, DATA_DIR
-        import os, shutil
         # Check for disabled UE4SS
         disabled_dir = DATA_DIR / "disabled_ue4ss"
         if (disabled_dir / "dwmapi.dll").exists() or (disabled_dir / "UE4SS").exists():
-            from PyQt5.QtWidgets import QMessageBox
             reply = QMessageBox.warning(
                 self,
                 "Warning: Disabled UE4SS Present",
@@ -2587,11 +2599,9 @@ QTreeView::item:selected {
         self._refresh_ue4ss_status()
 
     def _uninstall_ue4ss(self):
-        from mod_manager.ue4ss_installer import uninstall_ue4ss
         if not self.game_path:
             self.show_status("Set game path first.", 6000, "error")
             return
-        from PyQt5.QtWidgets import QMessageBox
         reply = QMessageBox.warning(
             self,
             "Uninstall UE4SS",
@@ -2622,9 +2632,6 @@ QTreeView::item:selected {
         context_menu.exec_(sender.mapToGlobal(position))
 
     def _remove_ue4ss_mod(self, mod_name):
-        from mod_manager.ue4ss_installer import get_ue4ss_mods_dir
-        import shutil
-        from PyQt5.QtWidgets import QMessageBox
         mods_dir = get_ue4ss_mods_dir(self.game_path)
         mod_path = mods_dir / mod_name if mods_dir else None
         if not mod_path or not mod_path.exists():
@@ -2642,7 +2649,6 @@ QTreeView::item:selected {
         try:
             shutil.rmtree(mod_path)
             # Remove from mods.txt
-            from mod_manager.ue4ss_installer import get_ue4ss_bin_dir
             bin_dir = get_ue4ss_bin_dir(self.game_path)
             mods_file = bin_dir / "UE4SS" / "Mods" / "mods.txt" if bin_dir else None
             if mods_file and mods_file.exists():
@@ -2666,9 +2672,6 @@ QTreeView::item:selected {
                 )
 
     def _toggle_ue4ss_enabled(self):
-        from mod_manager.ue4ss_installer import get_ue4ss_bin_dir
-        from mod_manager.utils import DATA_DIR
-        import shutil, os
         bin_dir = get_ue4ss_bin_dir(self.game_path)
         disabled_dir = DATA_DIR / "disabled_ue4ss"
         dll_disabled = disabled_dir / "dwmapi.dll"
@@ -2705,7 +2708,6 @@ QTreeView::item:selected {
             self.ue4ss_action_btn.setText("Uninstall UE4SS")
         else:
             self.ue4ss_action_btn.setText("Install UE4SS")
-        from mod_manager.utils import DATA_DIR
         disabled_dir = DATA_DIR / "disabled_ue4ss"
         dll_disabled = disabled_dir / "dwmapi.dll"
         ue4ss_disabled = disabled_dir / "UE4SS"
@@ -2715,9 +2717,6 @@ QTreeView::item:selected {
             self.ue4ss_disable_btn.setText("Disable UE4SS")
 
     def _disable_ue4ss(self):
-        from mod_manager.ue4ss_installer import get_ue4ss_bin_dir
-        from mod_manager.utils import DATA_DIR
-        import shutil, os
         bin_dir = get_ue4ss_bin_dir(self.game_path)
         if not bin_dir:
             self.show_status("UE4SS not found to disable.", 5000, "error")
@@ -2770,11 +2769,9 @@ QTreeView::item:selected {
     def _save_custom_mod_dir(self):
         name = self.mod_dir_edit.text().strip()
         try:
-            from mod_manager.utils import set_custom_mod_dir_name
             old = get_custom_mod_dir_name()
             set_custom_mod_dir_name(name)
             # Prompt for migration if old dir exists and is different
-            from mod_manager.pak_manager import get_paks_root_dir
             old_dir = os.path.join(get_paks_root_dir(self.game_path), old)
             new_dir = os.path.join(get_paks_root_dir(self.game_path), name)
             if os.path.isdir(old_dir) and old != name:
@@ -2792,7 +2789,6 @@ QTreeView::item:selected {
 
     def _browse_mod_dir_name(self):
         # Let user pick a folder, but only use the folder name
-        from mod_manager.pak_manager import get_paks_root_dir
         base_dir = None
         if self.game_path:
             paks_root = get_paks_root_dir(self.game_path)
@@ -2937,7 +2933,6 @@ QTreeView::item:selected {
         else:
             msg = "MagicLoader not installed."
 
-        from mod_manager.magicloader_installer import list_ml_json_mods
         enabled, disabled = list_ml_json_mods(self.game_path)
 
         rows = rows_from_magic(enabled, disabled)
@@ -3009,7 +3004,6 @@ QTreeView::item:selected {
         """
         Show info box: open Nexus page or browse for already‑downloaded archive.
         """
-        from PyQt5.QtWidgets import QMessageBox, QFileDialog
         url = "https://www.nexusmods.com/oblivionremastered/mods/1966?tab=description"
 
         box = QMessageBox(self)
@@ -3048,7 +3042,6 @@ QTreeView::item:selected {
         self._refresh_magic_status()
 
     def _toggle_magic_enabled(self):
-        from mod_manager.utils import DATA_DIR
         disabled_root = Path(DATA_DIR)/"disabled_magicloader"/"MagicLoader"
         ok, _ = magicloader_installed(self.game_path)
         if ok:
@@ -3073,8 +3066,6 @@ QTreeView::item:selected {
     # Launch MagicLoader executable
     # ------------------------------------------------------------------
     def _launch_magicloader(self):
-        from mod_manager.magicloader_installer import get_magicloader_dir
-        import os
 
         ml_dir = get_magicloader_dir(self.game_path)
         if not ml_dir:
@@ -3158,7 +3149,6 @@ QTreeView::item:selected {
         is_installed, version_or_error = obse64_installed(self.game_path)
         
         # Check if we have disabled OBSE64 backup
-        from mod_manager.utils import DATA_DIR
         disabled_dir = DATA_DIR / "disabled_obse64"
         has_disabled = disabled_dir.exists() and any(disabled_dir.glob("obse64_*"))
         
@@ -3190,7 +3180,6 @@ QTreeView::item:selected {
             self._uninstall_obse64()
         else:
             # Check if we have disabled backup to re-enable
-            from mod_manager.utils import DATA_DIR
             disabled_dir = DATA_DIR / "disabled_obse64"
             if disabled_dir.exists() and any(disabled_dir.glob("obse64_*")):
                 self._reenable_obse64()
@@ -3209,10 +3198,8 @@ QTreeView::item:selected {
             return
         
         # Check Steam restriction first
-        from mod_manager.utils import get_install_type
         install_type = get_install_type()
         if install_type != "steam":
-            from PyQt5.QtWidgets import QMessageBox
             QMessageBox.warning(
                 self,
                 "OBSE64 Not Supported",
@@ -3267,7 +3254,6 @@ QTreeView::item:selected {
 
     def _uninstall_obse64(self):
         """Uninstall OBSE64 (move to disabled folder)."""
-        from PyQt5.QtWidgets import QMessageBox
         
         reply = QMessageBox.warning(
             self,
@@ -3344,7 +3330,6 @@ QTreeView::item:selected {
 
     def _remove_obse64_plugin(self, plugin_name):
         """Remove OBSE64 plugin permanently."""
-        from PyQt5.QtWidgets import QMessageBox
         
         reply = QMessageBox.question(
             self,
@@ -3420,7 +3405,6 @@ QTreeView::item:selected {
         """Toggle PAK mod with undo support."""
         print(f'[UNDO-DEBUG] _toggle_pak_with_undo called: pak_id={pak_id}, enable={enable}')
         # Get current state and pak_info
-        from mod_manager.pak_manager import list_managed_paks
         all_paks = list_managed_paks()
         
         # Find current state by reconstructing the ID from pak data
@@ -3551,7 +3535,6 @@ QTreeView::item:selected {
 
     def _get_esps_in_group(self, group_name: str) -> list:
         """Get all ESP names that belong to a specific group."""
-        from mod_manager.utils import get_display_info
         
         # Get all ESP files and check their group assignments
         esp_files = list_esp_files()
@@ -3574,7 +3557,6 @@ QTreeView::item:selected {
 
     def _toggle_ue4ss_with_undo(self, mod_name: str, enable: bool):
         """Toggle UE4SS mod with undo support.""" 
-        from mod_manager.ue4ss_installer import read_ue4ss_mods_txt
         
         # Get current state from mods.txt file, not folder existence
         enabled_mods, disabled_mods = read_ue4ss_mods_txt(self.game_path)
@@ -3585,7 +3567,6 @@ QTreeView::item:selected {
             
         # Create toggle action
         def toggle_callback(mod_id, new_state):
-            from mod_manager.ue4ss_installer import set_ue4ss_mod_enabled
             set_ue4ss_mod_enabled(self.game_path, mod_id, new_state)
             
         action = self._create_toggle_action(
@@ -3596,7 +3577,6 @@ QTreeView::item:selected {
         
     def _toggle_magic_with_undo(self, mod_name: str, enable: bool):
         """Toggle MagicLoader mod with undo support."""
-        from mod_manager.magicloader_installer import list_ml_json_mods
         
         enabled_mods, disabled_mods = list_ml_json_mods(self.game_path)
         current_state = any(m == mod_name for m in enabled_mods)
@@ -3606,7 +3586,6 @@ QTreeView::item:selected {
             
         # Create toggle action
         def toggle_callback(mod_id, new_state):
-            from mod_manager.magicloader_installer import activate_ml_mod, deactivate_ml_mod
             if new_state:
                 activate_ml_mod(self.game_path, mod_id)
             else:
@@ -3714,7 +3693,6 @@ QTreeView::item:selected {
         if not node:
             return
 
-        from PyQt5.QtWidgets import QMenu, QAction, QInputDialog, QMessageBox
 
         # ========== GROUP HEADER CONTEXT MENU ==========
         if getattr(node, "is_group", False):
@@ -3746,7 +3724,6 @@ QTreeView::item:selected {
                     new_group = text.strip()
                     # Update all ESPs in this group to the new group name
                     esps_in_group = self._get_esps_in_group(group_name)
-                    from mod_manager.utils import set_display_info
                     for esp_name in esps_in_group:
                         set_display_info(f"|{esp_name}", group=new_group)
                     self.refresh_lists()
@@ -3820,7 +3797,6 @@ QTreeView::item:selected {
         elif action == rename_action and not many:
             # Handle single ESP rename
             esp_name = esp_names[0]
-            from mod_manager.utils import get_display_info, set_display_info
             esp_id = f"|{esp_name}"  # Use correct ID format
             current_text = get_display_info(esp_id).get("display", esp_name)
             
@@ -3836,7 +3812,6 @@ QTreeView::item:selected {
                     
         elif action == group_action:
             # Handle group assignment (bulk or single)
-            from mod_manager.utils import get_display_info, set_display_info, set_display_info_bulk
             first_esp = esp_names[0]
             first_esp_id = f"|{first_esp}"  # Use correct ID format
             current_group = get_display_info(first_esp_id).get("group", "")
@@ -3949,8 +3924,6 @@ QTreeView::item:selected {
 
     def _get_paks_in_group(self, group_name: str) -> list:
         """Get all PAK IDs that belong to a specific group."""
-        from mod_manager.utils import get_display_info
-        from mod_manager.pak_manager import list_managed_paks
         
         # Get all PAK files and check their group assignments
         all_paks = list_managed_paks()
@@ -3994,7 +3967,6 @@ QTreeView::item:selected {
             return
             
         # Get current states for all PAKs
-        from mod_manager.pak_manager import list_managed_paks, activate_pak, deactivate_pak
         all_paks = list_managed_paks()
         pak_states = {}
         
@@ -4050,8 +4022,6 @@ QTreeView::item:selected {
 
     def _get_magic_mods_in_group(self, group_name: str) -> list:
         """Get all MagicLoader JSON mod names that belong to a specific group."""
-        from mod_manager.utils import get_display_info
-        from mod_manager.magicloader_installer import list_ml_json_mods
         
         # Get all MagicLoader JSON files and check their group assignments
         enabled_mods, disabled_mods = list_ml_json_mods(self.game_path)
@@ -4094,7 +4064,6 @@ QTreeView::item:selected {
             return
             
         # Get current states for all mods
-        from mod_manager.magicloader_installer import list_ml_json_mods
         enabled_mods, disabled_mods = list_ml_json_mods(self.game_path)
         
         # Build list of changes needed
@@ -4114,7 +4083,6 @@ QTreeView::item:selected {
         def toggle_callback(mod_id, new_state):
             # This callback will be called for individual items in bulk operations
             # We don't call the CLI here since we'll batch everything
-            from mod_manager.magicloader_installer import activate_ml_mod, deactivate_ml_mod
             if new_state:
                 activate_ml_mod(self.game_path, mod_id)
             else:
@@ -4159,7 +4127,6 @@ QTreeView::item:selected {
         if not node:
             return
 
-        from PyQt5.QtWidgets import QMenu, QAction, QInputDialog, QMessageBox
 
         # ========== GROUP HEADER CONTEXT MENU ==========
         if getattr(node, "is_group", False):
@@ -4191,7 +4158,6 @@ QTreeView::item:selected {
                     new_group = text.strip()
                     # Update all MagicLoader mods in this group to the new group name
                     mods_in_group = self._get_magic_mods_in_group(group_name)
-                    from mod_manager.utils import set_display_info
                     for mod_name in mods_in_group:
                         set_display_info(f"|{mod_name}", group=new_group)
                     self._refresh_magic_status()
@@ -4262,7 +4228,6 @@ QTreeView::item:selected {
         elif action == rename_action and not many:
             # Handle single mod rename
             mod_name = mod_names[0]
-            from mod_manager.utils import get_display_info, set_display_info
             mod_id = f"|{mod_name}"
             current_text = get_display_info(mod_id).get("display", mod_name)
             
@@ -4278,7 +4243,6 @@ QTreeView::item:selected {
                     
         elif action == group_action:
             # Handle group assignment (bulk or single)
-            from mod_manager.utils import get_display_info, set_display_info, set_display_info_bulk
             first_mod_id = f"|{mod_names[0]}"
             current_group = get_display_info(first_mod_id).get("group", "")
             
@@ -4338,7 +4302,6 @@ QTreeView::item:selected {
 
     def _remove_magic_mod(self, mod_name: str):
         """Remove MagicLoader JSON mod permanently."""
-        from mod_manager.magicloader_installer import get_ml_mods_dir, get_disabled_ml_mods_dir
         
         enabled_dir = get_ml_mods_dir(self.game_path)
         disabled_dir = get_disabled_ml_mods_dir(self.game_path)
@@ -4362,7 +4325,6 @@ QTreeView::item:selected {
             
             if removed:
                 # Call CLI to reload configuration after deletion
-                from mod_manager.magicloader_installer import reload_ml_config
                 reload_ml_config(self.game_path)
                 self.show_status(f"MagicLoader mod '{mod_name}' was deleted successfully.", 4000, "success")
                 self._refresh_magic_status()
@@ -4373,11 +4335,6 @@ QTreeView::item:selected {
 
     def _install_obse64_from_loose_files(self, obse64_files):
         """Install OBSE64 from a list of loose file paths."""
-        from mod_manager.obse64_installer import install_obse64
-        from mod_manager.utils import get_install_type
-        import tempfile
-        import uuid
-        import shutil
         
         # Check Steam restriction
         install_type = get_install_type()
@@ -4464,8 +4421,6 @@ class MigrateModsDialog(QDialog):
 
 
 def migrate_mods(old_dir, new_dir, parent=None):
-    import shutil, os
-    from PyQt5.QtWidgets import QProgressDialog
     if not os.path.isdir(old_dir):
         return 0
     # Count files to move

@@ -143,42 +143,6 @@ The generic `_refresh_parent_views()` method supports all tabs:
 - **ESP**: Note position → Update → Manually drag back to original position
 - **PAK**: Note metadata → Delete old → Install new → Re-assign metadata
 
-## Recent Bug Fixes
-
-### MagicLoader Double Context Menu Issue (Fixed - Current Session)
-
-**Problem**: In the MagicLoader tab, when entering a display name or group name and pressing Enter, the operation would work but immediately open another context menu. Users had to click OK/Cancel to dismiss this second menu.
-
-**Root Cause**: MagicLoader views had both the generic context menu (from `ModTreeBrowser`) AND the specific context menu connected simultaneously. Unlike ESP tab, MagicLoader wasn't disconnecting the generic context menu before connecting its specific one.
-
-**Solution Applied**:
-- **File**: `ui/main_window.py` (lines ~543-548)
-- **Change**: Added `disconnect()` calls before `connect()` calls for MagicLoader context menus
-- **Pattern**: Made MagicLoader follow the same pattern as ESP tab to prevent dual context menu conflicts
-
-```python
-# Added these disconnect calls before the existing connect calls
-self.magic_enabled_view.customContextMenuRequested.disconnect()
-self.magic_disabled_view.customContextMenuRequested.disconnect()
-```
-
-**Impact**: 
-- ✅ Eliminates double context menu in MagicLoader tab
-- ✅ Makes MagicLoader consistent with ESP tab behavior
-- ✅ Provides clean user experience for display name and group operations
-
-### MagicLoader Group Update Issue (Fixed - Previous Session)
-
-**Problem**: When using the context menu to group a MagicLoader mod, the group name didn't update in the table view until the mod was activated/deactivated.
-
-**Root Cause**: The `_refresh_parent_views()` method in `ui/jorkTreeBrowser.py` (line 369) was missing `_refresh_magic_status` from its refresh function list, causing the MagicLoader tab views not to update immediately after group changes.
-
-**Solution Applied**: 
-- **File**: `ui/jorkTreeBrowser.py`
-- **Line**: 369 
-- **Change**: Updated refresh method list to include all tab refresh functions
-
-## Undo/Redo System Architecture
 
 ### Core Components
 
@@ -311,11 +275,6 @@ self.magic_disabled_view.customContextMenuRequested.disconnect()
 - **FOMOD Support**: Graphical installer for complex mod packages
 - **Conflict Detection**: Visual indicators for mod conflicts and dependencies
 
-### Technical Improvements
-- **Performance Optimization**: Faster scanning and loading for large mod collections
-- **Enhanced Validation**: Better mod compatibility checking
-- **Cloud Sync**: Optional cloud backup of mod configurations
-- **Plugin System**: Extensible architecture for community additions
 
 ## Development Notes
 
@@ -340,27 +299,6 @@ self.magic_disabled_view.customContextMenuRequested.disconnect()
 - **Generic vs. Specific**: Balance between reusable generic components and tab-specific functionality
 - **Metadata Preservation**: Consider implementing proper update workflows that preserve all metadata
 
-## Recent Changes Summary
 
-### Context Menu Architecture Fix (Current Session)
-1. **Fixed MagicLoader Double Context Menu**: Added proper disconnect/connect pattern to prevent dual context menu conflicts
-2. **Standardized Context Menu Handling**: Made MagicLoader consistent with ESP tab implementation
-3. **Enhanced Documentation**: Updated context menu architecture documentation with conflict prevention patterns
-4. **Improved User Experience**: Eliminated confusing double context menu behavior in MagicLoader tab
-
-### LogicMods System Overhaul (Previous Session)
-1. **Fixed LogicMods Reactivation**: Complete rewrite of `reconcile_pak_list()` to update existing entries
-2. **Fixed Group Preservation**: Enhanced regex pattern and fallback logic for disabled mods
-3. **Enhanced Installation Flow**: Added automatic metadata correction after LogicMods merge
-4. **Improved Error Handling**: Better detection and correction of metadata inconsistencies
-5. **Discovered Update Limitations**: Documented current mod update workflow limitations
-
-### Earlier Major Updates
-- Complete OBSE64 support implementation
-- Comprehensive undo/redo system across all mod types
-- Multi-loader archive detection and installation
-- Advanced tree view organization with grouping
-- Modern dark theme UI overhaul
-- MagicLoader group update refresh fix
 
 This application represents a mature, full-featured mod management solution with robust LogicMods support and continuing development focused on user experience and advanced workflow support. 

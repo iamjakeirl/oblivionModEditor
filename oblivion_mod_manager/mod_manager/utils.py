@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 import filecmp
 import shutil
+import requests
 
 # For Windows standard application data location
 def get_app_data_dir():
@@ -121,6 +122,19 @@ def open_folder_in_explorer(path):
 # UE4SS support
 UE4SS_URL = "https://github.com/UE4SS-RE/RE-UE4SS/releases/download/experimental-latest/UE4SS_v3.0.1-394-g437a8ff.zip"
 UE4SS_VERSION = "v3.0.1-394-g437a8ff"
+
+def get_ue4ss_download_url():
+    """Get the latest UE4SS download URL from GitHub API, fallback to hardcoded URL."""
+    try:
+        response = requests.get("https://api.github.com/repos/UE4SS-RE/RE-UE4SS/releases/tags/experimental-latest", timeout=10)
+        assets = response.json()["assets"]
+        for asset in assets:
+            name = asset["name"]
+            if name.startswith("UE4SS_v") and name.endswith(".zip") and not name.startswith("zDEV"):
+                return asset["browser_download_url"]
+    except:
+        pass
+    return UE4SS_URL  # fallback to hardcoded
 
 # ----- MagicLoader ---------------------------------------------------------
 MAGICLOADER_URL     = "https://github.com/Haphestia/MagicLoader/releases/latest/download/MagicLoader.zip"
